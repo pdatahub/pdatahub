@@ -1,0 +1,34 @@
+# Gradle
+.gradle/
+build/
+out/
+local.properties
+.kotlin/
+.idea/
+
+# Android Studio
+.cxx/
+captures/
+*.iml
+
+# Test reports
+test-results/
+reports/
+
+# APK / AAB
+*.apk
+*.aab
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Keystore (never commit)
+*.jks
+*.keystore
+
+# Generated
+**/generated/
