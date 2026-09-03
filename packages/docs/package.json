@@ -1,0 +1,10 @@
+{
+  "name": "@pdatahub/docs",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Documentation site (Docusaurus or Starlight)",
+  "scripts": {
+    "build": "echo 'docs not set up yet'",
+    "dev": "echo 'docs not set up yet'"
+  }
+}

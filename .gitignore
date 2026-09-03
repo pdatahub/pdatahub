@@ -1,0 +1,43 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build outputs
+dist/
+build/
+*.tsbuildinfo
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# IDE
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
+.DS_Store
+
+# Coverage
+coverage/
+*.lcov
+
+# Turbo
+.turbo/
+
+# Android (will be relevant later)
+*.apk
+*.aab
+*.iml
+.gradle/
+local.properties
+
+# Cloudflare
+.wrangler/
+.dev.vars
