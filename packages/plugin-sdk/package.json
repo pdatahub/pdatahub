@@ -1,16 +1,36 @@
 {
   "name": "@pdatahub/plugin-sdk",
-  "version": "0.0.0",
-  "private": true,
-  "description": "SDK for writing pdatahub plugins",
-  "main": "src/index.ts",
+  "version": "0.1.0",
+  "description": "SDK for writing pdatahub plugins in TypeScript",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
   "scripts": {
-    "build": "tsc",
-    "test": "echo 'no tests yet'",
-    "lint": "echo 'no lint yet'",
-    "dev": "tsc --watch"
+    "build": "tsc && npm run build:examples",
+    "build:examples": "tsc -p tsconfig.examples.json && node -e \"require('fs').rmSync('dist/examples/src', { recursive: true, force: true }); require('fs').renameSync('dist/examples/examples/example-plugin.js', 'dist/examples/example-plugin.js'); require('fs').rmSync('dist/examples/examples', { recursive: true, force: true });\"",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "echo 'lint TBD'",
+    "dev": "tsc --watch",
+    "clean": "rm -rf dist coverage"
+  },
+  "keywords": [
+    "pdatahub",
+    "plugin-sdk",
+    "mcp"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "undici": "^6.0.0"
   },
   "devDependencies": {
-    "typescript": "^5.4.0"
+    "@types/node": "^20.0.0",
+    "typescript": "^5.4.0",
+    "vitest": "^1.6.0"
   }
 }
