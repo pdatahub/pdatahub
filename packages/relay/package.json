@@ -1,17 +1,40 @@
 {
   "name": "@pdatahub/relay",
-  "version": "0.0.0",
+  "version": "0.1.0",
+  "description": "Cloudflare Worker relay for Hub-to-laptop WebSocket routing",
   "private": true,
-  "description": "Cloudflare Worker relay for Hub-to-laptop routing",
-  "main": "src/index.ts",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
   "scripts": {
-    "build": "echo 'relay not implemented yet'",
-    "test": "echo 'relay not implemented yet'",
-    "lint": "echo 'relay not implemented yet'",
-    "dev": "wrangler dev"
+    "build": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "echo 'lint TBD'",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "clean": "rm -rf dist .wrangler coverage"
+  },
+  "keywords": [
+    "pdatahub",
+    "cloudflare-workers",
+    "durable-objects",
+    "websocket"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "zod": "^4.0.0"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "^4.20240903.0",
     "typescript": "^5.4.0",
-    "wrangler": "^3.0.0"
+    "vitest": "^1.6.0",
+    "wrangler": "^3.78.0"
   }
 }
