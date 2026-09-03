@@ -17,6 +17,7 @@ sqlcipher = "4.6.1"
 
 ktor = "2.3.12"
 okhttp = "4.12.0"
+zxing = "3.5.3"
 
 bouncycastle = "1.78.1"
 tink = "1.13.0"
@@ -63,6 +64,7 @@ ktor-server-status-pages = { group = "io.ktor", name = "ktor-server-status-pages
 
 okhttp = { group = "com.squareup.okhttp3", name = "okhttp", version.ref = "okhttp" }
 okhttp-logging = { group = "com.squareup.okhttp3", name = "logging-interceptor", version.ref = "okhttp" }
+zxing-core = { group = "com.google.zxing", name = "core", version.ref = "zxing" }
 
 bouncycastle-bcprov = { group = "org.bouncycastle", name = "bcprov-jdk18on", version.ref = "bouncycastle" }
 tink-android = { group = "com.google.crypto.tink", name = "tink-android", version.ref = "tink" }

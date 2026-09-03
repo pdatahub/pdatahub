@@ -103,6 +103,9 @@ dependencies {
     implementation(libs.okhttp)
     implementation(libs.okhttp.logging)
 
+    // ZXing (QR code rendering for pairing)
+    implementation(libs.zxing.core)
+
     // Crypto (BouncyCastle for Ed25519, Tink for AES-GCM helpers)
     implementation(libs.bouncycastle.bcprov)
     implementation(libs.tink.android)

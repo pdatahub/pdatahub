@@ -2,6 +2,9 @@ package com.pdatahub.hub.ui.home
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.pdatahub.hub.data.SettingsRepository
+import com.pdatahub.hub.data.db.PluginDao
+import com.pdatahub.hub.data.db.PluginEntity
 import com.pdatahub.hub.data.identity.IdentityManager
 import com.pdatahub.hub.pairing.PairingManager
 import com.pdatahub.hub.plugin.PluginManager
@@ -9,16 +12,18 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
 data class HomeUiState(
     val publicKeyBase64: String = "",
     val sessionToken: String? = null,
-    val pairingPayload: String? = null,
+    val qrPayload: String? = null,
+    val relayUrl: String = SettingsRepository.DEFAULT_RELAY_URL,
     val tools: List<ToolItem> = emptyList(),
     val nodePathResolved: Boolean = false,
+    val showInstallDialog: Boolean = false,
+    val installError: String? = null,
 )
 
 data class ToolItem(
@@ -33,12 +38,15 @@ class HomeViewModel @Inject constructor(
     private val identity: IdentityManager,
     private val pairing: PairingManager,
     private val plugins: PluginManager,
+    private val pluginDao: PluginDao,
+    private val settings: SettingsRepository,
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(
         HomeUiState(
             publicKeyBase64 = identity.publicKeyBase64(),
             nodePathResolved = plugins.resolveNodePath() != null,
+            relayUrl = settings.relayUrl,
         )
     )
     val state: StateFlow<HomeUiState> = _state.asStateFlow()
@@ -51,7 +59,8 @@ class HomeViewModel @Inject constructor(
                     is PairingManager.PairingState.Active -> pairingState.sessionToken
                     PairingManager.PairingState.Idle -> null
                 }
-                _state.value = _state.value.copy(sessionToken = token)
+                val qr = token?.let { pairing.buildQrPayload(settings.relayUrl) }
+                _state.value = _state.value.copy(sessionToken = token, qrPayload = qr)
             }
         }
         viewModelScope.launch {
@@ -69,6 +78,12 @@ class HomeViewModel @Inject constructor(
                 _state.value = _state.value.copy(tools = tools)
             }
         }
+        viewModelScope.launch {
+            pluginDao.observeAll().collect { entities ->
+                // Future: show installed plugins list with enable/disable toggles
+                _state.value = _state.value.copy(installError = null)
+            }
+        }
     }
 
     fun togglePairing() {
@@ -78,9 +93,57 @@ class HomeViewModel @Inject constructor(
         }
     }
 
+    fun setRelayUrl(url: String) {
+        settings.relayUrl = url
+        val token = (pairing.state.value as? PairingManager.PairingState.AwaitingLaptop)?.sessionToken
+            ?: (pairing.state.value as? PairingManager.PairingState.Active)?.sessionToken
+        val qr = token?.let { pairing.buildQrPayload(url) }
+        _state.value = _state.value.copy(relayUrl = url, qrPayload = qr)
+    }
+
+    fun showInstallDialog() {
+        _state.value = _state.value.copy(showInstallDialog = true, installError = null)
+    }
+
+    fun dismissInstallDialog() {
+        _state.value = _state.value.copy(showInstallDialog = false)
+    }
+
+    /**
+     * Install a plugin by absolute path to its entry point.
+     *
+     * Persists to [PluginDao] and restarts the subprocess registry so the
+     * plugin manifest becomes available via the MCP HTTP server.
+     */
+    fun installPlugin(entryPath: String) {
+        if (entryPath.isBlank()) {
+            _state.value = _state.value.copy(installError = "Path is empty")
+            return
+        }
+        viewModelScope.launch {
+            try {
+                val name = entryPath.substringAfterLast('/').substringBeforeLast('.')
+                    .ifBlank { "plugin-${System.currentTimeMillis()}" }
+                val entity = PluginEntity(
+                    name = name,
+                    version = "0.1.0",
+                    entryPath = entryPath,
+                    enabled = true,
+                    installedAt = System.currentTimeMillis(),
+                    configJson = "{}",
+                )
+                pluginDao.upsert(entity)
+                plugins.refreshInstalled()
+                _state.value = _state.value.copy(showInstallDialog = false, installError = null)
+            } catch (e: Throwable) {
+                _state.value = _state.value.copy(installError = e.message ?: "Install failed")
+            }
+        }
+    }
+
     fun refreshTools() {
         viewModelScope.launch {
-            // Re-scan manifests. Real impl would re-read PluginDao and restart processes.
+            plugins.refreshInstalled()
         }
     }
 }

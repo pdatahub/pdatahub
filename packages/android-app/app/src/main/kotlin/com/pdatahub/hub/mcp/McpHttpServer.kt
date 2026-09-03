@@ -1,5 +1,7 @@
 package com.pdatahub.hub.mcp
 
+import com.pdatahub.hub.data.crypto.CryptoBox
+import com.pdatahub.hub.data.db.TokenDao
 import com.pdatahub.hub.plugin.PluginManager
 import com.pdatahub.hub.plugin.lookupTool
 import io.ktor.http.HttpStatusCode
@@ -43,6 +45,8 @@ import javax.inject.Singleton
 @Singleton
 class McpHttpServer @Inject constructor(
     private val pluginManager: PluginManager,
+    private val tokenDao: TokenDao,
+    private val cryptoBox: CryptoBox,
 ) {
     @Volatile
     private var server: io.ktor.server.engine.ApplicationEngine? = null
@@ -111,8 +115,9 @@ class McpHttpServer @Inject constructor(
                         return@post
                     }
                     try {
+                        val accessToken = runBlocking { resolveAccessToken(lookup.pluginName, lookup.tool.scope) }
                         val resp = runBlocking {
-                            lookup!!.process.callTool(toolName, args, accessToken = null)
+                            lookup!!.process.callTool(toolName, args, accessToken = accessToken)
                         }
                         if (resp.error != null) {
                             call.respond(
@@ -143,6 +148,18 @@ class McpHttpServer @Inject constructor(
         if (sessionToken.isEmpty()) return false
         val auth = call.request.headers["Authorization"] ?: return false
         return auth == "Bearer $sessionToken"
+    }
+
+    /**
+     * Resolve the OAuth access token for a given plugin + scope, decrypting it
+     * via CryptoBox. Returns null when no token is stored (plugin runs without
+     * auth, or the user hasn't completed OAuth yet).
+     */
+    private suspend fun resolveAccessToken(pluginName: String, scope: String): String? {
+        val key = "${pluginName}:${scope}"
+        val entity = tokenDao.get(key) ?: return null
+        return cryptoBox.decrypt(entity.accessTokenCiphertext, entity.aad)
+            ?.toString(Charsets.UTF_8)
     }
 
     companion object {

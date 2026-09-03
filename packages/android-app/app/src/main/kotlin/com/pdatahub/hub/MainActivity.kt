@@ -32,7 +32,12 @@ class MainActivity : ComponentActivity() {
                         onStartServer = { startServer() },
                         onStopServer = { stopServer() },
                         onPairingToggle = { viewModel.togglePairing() },
+                        onRelayUrlChange = { viewModel.setRelayUrl(it) },
                         onRefreshTools = { viewModel.refreshTools() },
+                        onInstallPlugin = { path -> viewModel.installPlugin(path) },
+                        showInstallDialog = state.showInstallDialog,
+                        onShowInstallDialog = { viewModel.showInstallDialog() },
+                        onDismissInstallDialog = { viewModel.dismissInstallDialog() },
                     )
                 }
             }
