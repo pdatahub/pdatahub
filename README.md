@@ -1,5 +1,7 @@
 # pdatahub — Personal Data Hub
 
+[![CI](https://github.com/pdatahub/pdatahub/actions/workflows/ci.yml/badge.svg)](https://github.com/pdatahub/pdatahub/actions/workflows/ci.yml)
+
 > Privacy-first personal data platform with MCP integration and verifiable grants.
 
 **Status:** Private (PoC phase). Will become public after MVP.
