@@ -5,9 +5,9 @@
   "description": "Cloudflare Worker relay for Hub-to-laptop routing",
   "main": "src/index.ts",
   "scripts": {
-    "build": "tsc",
-    "test": "echo 'no tests yet'",
-    "lint": "echo 'no lint yet'",
+    "build": "echo 'relay not implemented yet'",
+    "test": "echo 'relay not implemented yet'",
+    "lint": "echo 'relay not implemented yet'",
     "dev": "wrangler dev"
   },
   "devDependencies": {

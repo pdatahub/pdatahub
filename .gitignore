@@ -41,3 +41,6 @@ local.properties
 # Cloudflare
 .wrangler/
 .dev.vars
+
+# OpenCode session state (resume context after /compact)
+opencode/

@@ -1,17 +1,41 @@
 {
   "name": "@pdatahub/mcp-server",
-  "version": "0.0.0",
-  "private": true,
-  "description": "MCP server for laptop - bridges to phone via relay",
-  "main": "src/index.ts",
+  "version": "0.1.0",
+  "description": "MCP server that bridges AI agents (laptop) to pdatahub Hub (phone) via HTTP",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "pdatahub-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
   "scripts": {
-    "build": "tsc",
-    "test": "echo 'no tests yet'",
-    "lint": "echo 'no lint yet'",
-    "dev": "tsc --watch"
+    "build": "tsc && npm run build:examples",
+    "build:examples": "tsc -p tsconfig.examples.json && node -e \"require('fs').rmSync('dist/examples/src', { recursive: true, force: true });\"",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "echo 'lint TBD'",
+    "dev": "tsc --watch",
+    "clean": "rm -rf dist coverage"
+  },
+  "keywords": [
+    "pdatahub",
+    "mcp",
+    "mcp-server"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "undici": "^6.0.0",
+    "zod": "^4.0.0"
   },
   "devDependencies": {
+    "@types/node": "^20.0.0",
     "typescript": "^5.4.0",
-    "@modelcontextprotocol/sdk": "^1.0.0"
+    "vitest": "^1.6.0"
   }
 }

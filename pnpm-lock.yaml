@@ -18,13 +18,26 @@ importers:
   packages/docs: {}
 
   packages/mcp-server:
-    devDependencies:
+    dependencies:
       '@modelcontextprotocol/sdk':
-        specifier: ^1.0.0
-        version: 1.30.0(zod@3.22.3)
+        specifier: ^1.29.0
+        version: 1.30.0(zod@4.5.4)
+      undici:
+        specifier: ^6.0.0
+        version: 6.28.0
+      zod:
+        specifier: ^4.0.0
+        version: 4.5.4
+    devDependencies:
+      '@types/node':
+        specifier: ^20.0.0
+        version: 20.19.43
       typescript:
         specifier: ^5.4.0
         version: 5.9.3
+      vitest:
+        specifier: ^1.6.0
+        version: 1.6.1(@types/node@20.19.43)
 
   packages/plugin-sdk:
     dependencies:
@@ -1504,6 +1517,9 @@ packages:
   zod@3.22.3:
     resolution: {integrity: sha512-EjIevzuJRiRPbVH4mGc8nApb/lVLKVpmUhAaR5R5doKGfAnGJ6Gr3CViAVjP+4FWSxCsybeWQdcgCtbX+7oZug==}
 
+  zod@4.5.4:
+    resolution: {integrity: sha512-sC95tT5iHHH9gtpj6A81kh+NEaRAUFN+qlUPDUbRfOMvNf5QCBqsb3WgvnpVtK5Y+4UfA6KqufotuTvMGiTlsA==}
+
 snapshots:
 
   '@cloudflare/kv-asset-handler@0.3.4':
@@ -1779,7 +1795,7 @@ snapshots:
       '@jridgewell/resolve-uri': 3.1.2
       '@jridgewell/sourcemap-codec': 1.6.0
 
-  '@modelcontextprotocol/sdk@1.30.0(zod@3.22.3)':
+  '@modelcontextprotocol/sdk@1.30.0(zod@4.5.4)':
     dependencies:
       '@hono/node-server': 2.1.1(hono@4.13.5)
       ajv: 8.20.0
@@ -1796,8 +1812,8 @@ snapshots:
       json-schema-typed: 8.0.2
       pkce-challenge: 5.0.1
       raw-body: 3.0.2
-      zod: 3.22.3
-      zod-to-json-schema: 3.25.2(zod@3.22.3)
+      zod: 4.5.4
+      zod-to-json-schema: 3.25.2(zod@4.5.4)
     transitivePeerDependencies:
       - supports-color
 
@@ -2820,8 +2836,10 @@ snapshots:
       mustache: 4.2.0
       stacktracey: 2.2.0
 
-  zod-to-json-schema@3.25.2(zod@3.22.3):
+  zod-to-json-schema@3.25.2(zod@4.5.4):
     dependencies:
-      zod: 3.22.3
+      zod: 4.5.4
 
   zod@3.22.3: {}
+
+  zod@4.5.4: {}
