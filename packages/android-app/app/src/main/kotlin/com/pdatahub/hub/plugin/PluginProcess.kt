@@ -7,8 +7,12 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import java.io.BufferedWriter
 import java.io.InputStream
 import java.util.concurrent.ConcurrentHashMap
@@ -183,6 +187,3 @@ class PluginProcess @Inject constructor(
         }, "plugin-$pluginName-stderr").apply { isDaemon = true; start() }
     }
 }
-
-private fun kotlinx.serialization.json.JsonArray(items: List<JsonElement>) =
-    kotlinx.serialization.json.buildJsonArray { items.forEach { add(it) } }

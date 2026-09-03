@@ -12,6 +12,7 @@ import io.ktor.server.netty.Netty
 import io.ktor.server.plugins.callloging.CallLogging
 import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.server.plugins.statuspages.StatusPages
+import io.ktor.server.request.receiveNullable
 import io.ktor.server.response.respond
 import io.ktor.server.response.respondText
 import io.ktor.server.routing.get
@@ -111,11 +112,11 @@ class McpHttpServer @Inject constructor(
                     }
                     try {
                         val resp = runBlocking {
-                            lookup.process.callTool(toolName, args, accessToken = null)
+                            lookup!!.process.callTool(toolName, args, accessToken = null)
                         }
                         if (resp.error != null) {
                             call.respond(
-                                HttpStatusCode.fromDescription(resp.error.message) ?: HttpStatusCode.InternalServerError,
+                                HttpStatusCode(500, resp.error.message),
                                 mapOf("error" to resp.error.message),
                             )
                         } else {

@@ -11,7 +11,7 @@
     <string name="hub_tools_label">Available tools</string>
     <string name="hub_tools_empty">No plugins installed. Add a plugin to see its tools here.</string>
     <string name="hub_pairing_title">Pair a laptop</string>
-    <string name="hub_pairing_subtitle">Scan this QR code with the laptop's pdatahub-mcp client</string>
+    <string name="hub_pairing_subtitle">Scan this QR code with the laptop\'s pdatahub-mcp client</string>
     <string name="hub_pairing_session_label">Session token</string>
     <string name="notification_mcp_channel_name">MCP server</string>
     <string name="notification_mcp_channel_description">Local HTTP server for AI agent access</string>

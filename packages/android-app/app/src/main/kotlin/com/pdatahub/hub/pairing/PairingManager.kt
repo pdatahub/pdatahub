@@ -18,7 +18,7 @@ import javax.inject.Singleton
  *   2. Hub shows QR code: relay URL + session_token
  *   3. Laptop scans QR, opens `wss://relay/sessions/<id>/ws?role=laptop&token=<session_token>`
  *   4. Relay matches Hub and laptop, proxies JSON
- *   5. Hub stores session_token encrypted (CryptoBox), uses it as Bearer for /v1/*
+ *   5. Hub stores session_token encrypted (CryptoBox), uses it as Bearer for the v1 endpoint
  *
  * For init: session generation + secure storage + QR-ready URL composition.
  * UI for QR rendering is a follow-up.
