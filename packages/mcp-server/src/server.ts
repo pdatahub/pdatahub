@@ -7,12 +7,23 @@
  *   3. On `tools/call` from AI agent → forward to Hub → return result
  *
  * Hub is the source of truth for tool contracts. This server is a thin proxy.
+ *
+ * Implementation note: uses MCP SDK's low-level `Server` class directly,
+ * NOT the `McpServer` wrapper. SDK 1.30.0's `McpServer.setToolRequestHandlers()`
+ * has a bug where handlers are registered in `_requestHandlers` Map but routing
+ * returns -32601 "Method not found" for `tools/list` / `tools/call`. Low-level
+ * Server works correctly (verified via /tmp/low-level-{server,client}.mjs).
  */
 
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
-import { z } from 'zod';
+import {
+  CallToolRequestSchema,
+  ErrorCode,
+  ListToolsRequestSchema,
+  McpError,
+} from '@modelcontextprotocol/sdk/types.js';
 import { HubClient } from './hub-client.js';
 import { logger } from './logger.js';
 import type { ToolDescriptor } from './types.js';
@@ -22,16 +33,51 @@ export interface McpServerOptions {
   version?: string;
 }
 
+type CallToolResult = {
+  content: Array<{ type: 'text'; text: string }>;
+  isError?: boolean;
+};
+
+type ToolHandler = (args: Record<string, unknown>) => Promise<CallToolResult>;
+
 export class PdatahubMcpServer {
-  private readonly server: McpServer;
+  private readonly server: Server;
   private readonly hub: HubClient;
   private tools: Map<string, ToolDescriptor> = new Map();
+  private toolHandlers: Map<string, ToolHandler> = new Map();
 
   constructor(hub: HubClient, options: McpServerOptions = {}) {
     this.hub = hub;
-    this.server = new McpServer({
-      name: options.name ?? 'pdatahub-mcp',
-      version: options.version ?? '0.1.0',
+    this.server = new Server(
+      {
+        name: options.name ?? 'pdatahub-mcp',
+        version: options.version ?? '0.1.0',
+      },
+      {
+        capabilities: {
+          tools: {},
+        },
+      },
+    );
+
+    this.server.setRequestHandler(ListToolsRequestSchema, async () => {
+      return {
+        tools: Array.from(this.tools.values()).map((tool) => ({
+          name: tool.name,
+          description: this.buildDescription(tool),
+          inputSchema: tool.inputSchema,
+        })),
+      };
+    });
+
+    this.server.setRequestHandler(CallToolRequestSchema, async (request): Promise<CallToolResult> => {
+      const toolName = request.params.name;
+      const handler = this.toolHandlers.get(toolName);
+      if (!handler) {
+        throw new McpError(ErrorCode.InvalidParams, `Unknown tool: ${toolName}`);
+      }
+      const args = (request.params.arguments ?? {}) as Record<string, unknown>;
+      return handler(args);
     });
   }
 
@@ -42,6 +88,20 @@ export class PdatahubMcpServer {
   async refreshTools(): Promise<ToolDescriptor[]> {
     const tools = await this.hub.listTools();
     this.tools = new Map(tools.map((t) => [t.name, t]));
+    this.toolHandlers = new Map();
+    for (const tool of tools) {
+      this.toolHandlers.set(tool.name, async (args) => {
+        try {
+          return await this.hub.callTool(tool.name, args);
+        } catch (err) {
+          logger.error('tool call failed', { name: tool.name, error: (err as Error).message });
+          throw new McpError(
+            ErrorCode.InternalError,
+            `Hub call failed: ${(err as Error).message}`,
+          );
+        }
+      });
+    }
     logger.info(`Loaded ${tools.length} tools from Hub`);
     return tools;
   }
@@ -57,41 +117,13 @@ export class PdatahubMcpServer {
   }
 
   private registerOne(tool: ToolDescriptor): void {
-    this.server.registerTool(
-      tool.name,
-      {
-        description: this.buildDescription(tool),
-        // Stub: accept any object. Hub validates real inputs.
-        // We construct a passthrough Zod schema so the MCP SDK accepts
-        // arbitrary args without rejecting. Tight schemas come from Hub later.
-        inputSchema: z.object({}).passthrough(),
-      },
-      async (args) => {
-        logger.debug('tool call', { name: tool.name, args });
-        try {
-          const result = await this.hub.callTool(tool.name, args as Record<string, unknown>);
-          if (result.isError) {
-            return {
-              content: result.content,
-              isError: true,
-            };
-          }
-          return { content: result.content };
-        } catch (err) {
-          const msg = (err as Error).message;
-          logger.error('tool call failed', { name: tool.name, error: msg });
-          return {
-            content: [{ type: 'text', text: `Hub error: ${msg}` }],
-            isError: true,
-          };
-        }
-      },
-    );
-    logger.debug('registered tool', { name: tool.name, scope: tool.scope, plugin: tool.plugin });
     this.tools.set(tool.name, tool);
+    this.toolHandlers.set(tool.name, async (args) => {
+      return this.hub.callTool(tool.name, args);
+    });
   }
 
-  private buildDescription(tool: ToolDescriptor): string {
+  buildDescription(tool: ToolDescriptor): string {
     const meta = `[scope: ${tool.scope}, plugin: ${tool.plugin}]`;
     return `${tool.description} ${meta}`;
   }
@@ -112,7 +144,6 @@ export class PdatahubMcpServer {
   async serveStdio(): Promise<void> {
     const transport = new StdioServerTransport();
     await this.connect(transport);
-    // The stdio transport fires 'close' on the underlying streams.
     await new Promise<void>((resolve) => {
       const cleanup = () => resolve();
       process.stdin.once('close', cleanup);
