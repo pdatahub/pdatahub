@@ -1,10 +1,14 @@
 package com.pdatahub.hub.data.crypto
 
+import com.google.crypto.tink.Aead
+import com.google.crypto.tink.KeyTemplates
+import com.google.crypto.tink.KeysetHandle
+import com.google.crypto.tink.aead.AeadConfig
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
-import org.junit.Assert.assertNull
 import org.junit.Test
+import java.security.GeneralSecurityException
 
 /**
  * Pure-logic tests for CryptoBox that don't require Android Context.
@@ -37,10 +41,30 @@ class CryptoBoxContractTest {
     }
 
     @Test
-    fun `decrypt returns null on tampered ciphertext`() {
-        // Placeholder — real impl requires Android Keystore. Documented in
-        // androidTest/ source.
-        assertNotNull("placeholder", null)
-        assertNull(null)
+    fun `decrypt throws on tampered ciphertext`() {
+        // Real JVM-only Aead via Tink (no Android Keystore needed).
+        // CryptoBox.decrypt() relies on this contract — see CryptoBox.kt:61-65
+        // (try/catch wrapping aead.decrypt, returning null on exception).
+        AeadConfig.register()
+        val aead: Aead = KeysetHandle.generateNew(KeyTemplates.get("AES256_GCM"))
+            .getPrimitive(Aead::class.java)
+
+        val plaintext = "secret message".toByteArray()
+        val ciphertext = aead.encrypt(plaintext, null)
+        assertNotNull(ciphertext)
+
+        // Flip a byte in the auth tag (last 16 bytes of Tink's AES-GCM envelope).
+        // If the impl ever stops throwing on tampered ciphertext, we want CI to
+        // fail loudly — that's the entire point of authenticated encryption.
+        val tampered = ciphertext.copyOf()
+        tampered[tampered.size - 1] = (tampered[tampered.size - 1].toInt() xor 0x01).toByte()
+
+        try {
+            aead.decrypt(tampered, null)
+            org.junit.Assert.fail("Expected GeneralSecurityException on tampered ciphertext")
+        } catch (e: GeneralSecurityException) {
+            // Expected — AEAD tag verification failed. CryptoBox catches this
+            // and returns null in production (CryptoBox.kt:63-65).
+        }
     }
 }
