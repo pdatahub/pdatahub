@@ -136,12 +136,15 @@ if [ "$SKIP_PLUGIN" -eq 0 ]; then
   adb push "$PLUGIN_SOURCE/package.json" "$DEVICE_PLUGIN_PATH/" >/dev/null
 
   # node_modules contains .bin/ symlinks (tsc, vitest etc.) that adb push
-  # can't handle cleanly. Use tar: package locally, push single file, extract
-  # on device via adb shell + tar. Avoids all symlink issues.
-  log "Packaging node_modules as tarball (avoids .bin symlink issue)..."
+  # can't handle cleanly AND Android tar on /data/local/tmp fails to create
+  # symlinks (Permission denied). Fix: cp -RL creates symlink-free copy first,
+  # then tar -czf produces tarball with NO symlinks at all.
+  log "Packaging node_modules as tarball (symlink-free via cp -RL)..."
   NODE_MODULES_TARBALL="$(mktemp -t plugin-node_modules.XXXXXX.tar.gz)"
-  # -h dereferences symlinks (replaces with file copies)
-  tar -czhf "$NODE_MODULES_TARBALL" -C "$PLUGIN_SOURCE" node_modules
+  NM_COPY_DIR="$(mktemp -d -t pdatahub-nm.XXXXXX)"
+  cp -RL "$PLUGIN_SOURCE/node_modules" "$NM_COPY_DIR/node_modules"
+  tar -czf "$NODE_MODULES_TARBALL" -C "$NM_COPY_DIR" node_modules
+  rm -rf "$NM_COPY_DIR"
   TARBALL_SIZE=$(ls -lh "$NODE_MODULES_TARBALL" | awk '{print $5}')
   log "Tarball: $NODE_MODULES_TARBALL ($TARBALL_SIZE)"
 
