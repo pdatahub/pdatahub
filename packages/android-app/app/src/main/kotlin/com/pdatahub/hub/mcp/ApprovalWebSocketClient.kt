@@ -154,12 +154,13 @@ class ApprovalWebSocketClient @Inject constructor(
                 .url(wsUrl)
                 .build()
 
-            val opened = connectOnce(request)
+            val closedSignal = kotlinx.coroutines.CompletableDeferred<Unit>()
+            val opened = connectOnce(request, closedSignal)
             if (opened) {
                 attempt = 0
                 _state.value = ApprovalStreamState.CONNECTED
                 startHeartbeat()
-                waitForClose()
+                closedSignal.await()
                 stopHeartbeat()
             }
             _state.value = ApprovalStreamState.DISCONNECTED
@@ -169,7 +170,10 @@ class ApprovalWebSocketClient @Inject constructor(
         }
     }
 
-    private suspend fun connectOnce(request: Request): Boolean {
+    private suspend fun connectOnce(
+        request: Request,
+        closedSignal: kotlinx.coroutines.CompletableDeferred<Unit>,
+    ): Boolean {
         return suspendCancellableCoroutine { cont ->
             val listener = object : WebSocketListener() {
                 override fun onOpen(webSocket: WebSocket, response: Response) {
@@ -181,8 +185,19 @@ class ApprovalWebSocketClient @Inject constructor(
                     handleMessage(text)
                 }
 
+                override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                    webSocket.close(code, reason)
+                }
+
+                override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                    ws = null
+                    if (!closedSignal.isCompleted) closedSignal.complete(Unit)
+                }
+
                 override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                    ws = null
                     if (cont.isActive) cont.resumeWith(Result.success(false))
+                    if (!closedSignal.isCompleted) closedSignal.complete(Unit)
                 }
             }
             val socket = okHttpClient.newWebSocket(request, listener)
@@ -222,17 +237,6 @@ class ApprovalWebSocketClient @Inject constructor(
             }
         } catch (_: Exception) {
             // malformed payload — ignore
-        }
-    }
-
-    private suspend fun waitForClose() {
-        suspendCancellableCoroutine<Unit> { cont ->
-            val socket = ws ?: run {
-                cont.resumeWith(Result.success(Unit))
-                return@suspendCancellableCoroutine
-            }
-            socket.cancel()
-            cont.resumeWith(Result.success(Unit))
         }
     }
 
