@@ -4,6 +4,25 @@ Hub core for pdatahub — approval engine, token vault, audit log, and plugin su
 
 Replaces the Kotlin `McpHttpServer.kt` + `PluginManager.kt` from the original Android Hub APK. Now runs as a standalone Node.js process on the user's laptop (or home server). The Android APK becomes a thin UI client (approval notifications + audit log viewer).
 
+## Verified end-to-end (2026-09-05)
+
+Full e2e tested on Honor CMA-LX1:
+- ✅ AI agent (`curl`) → hub-core → WebSocket broadcast → Android phone UI
+- ✅ User tapped Approve on phone → hub-core processed decision → grant created → audit log persisted
+- ✅ Plugin subprocess spawned (Calendar plugin, 4 tools loaded)
+- ✅ Timeout (60s) → auto-deny works
+- ✅ Audit log queryable via `/v1/audit`
+
+Audit log entry from successful run:
+```json
+{
+  "agent_id": "phone-ui-test",
+  "decision": "approved",
+  "grant_id": "478dbd06-...",
+  "duration_ms": 8460
+}
+```
+
 ## Install
 
 ```bash
