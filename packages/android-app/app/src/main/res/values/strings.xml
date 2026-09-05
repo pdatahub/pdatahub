@@ -1,20 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">pdatahub</string>
-    <string name="hub_title">pdatahub Hub</string>
-    <string name="hub_subtitle">Privacy-first personal data hub</string>
-    <string name="hub_public_key_label">Identity (public key)</string>
-    <string name="hub_status_running">MCP server running</string>
-    <string name="hub_status_stopped">MCP server stopped</string>
-    <string name="hub_status_start">Start MCP server</string>
-    <string name="hub_status_stop">Stop MCP server</string>
-    <string name="hub_tools_label">Available tools</string>
-    <string name="hub_tools_empty">No plugins installed. Add a plugin to see its tools here.</string>
-    <string name="hub_pairing_title">Pair a laptop</string>
-    <string name="hub_pairing_subtitle">Scan this QR code with the laptop\'s pdatahub-mcp client</string>
-    <string name="hub_pairing_session_label">Session token</string>
-    <string name="notification_mcp_channel_name">MCP server</string>
-    <string name="notification_mcp_channel_description">Local HTTP server for AI agent access</string>
-    <string name="notification_mcp_title">pdatahub Hub is running</string>
-    <string name="notification_mcp_text">MCP server is listening on %1$s</string>
 </resources>

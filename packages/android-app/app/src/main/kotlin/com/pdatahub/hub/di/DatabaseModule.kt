@@ -4,7 +4,6 @@ import android.content.Context
 import androidx.room.Room
 import com.pdatahub.hub.data.db.DatabasePassphrase
 import com.pdatahub.hub.data.db.HubDatabase
-import com.pdatahub.hub.data.db.PluginDao
 import com.pdatahub.hub.data.db.TokenDao
 import dagger.Module
 import dagger.Provides
@@ -43,7 +42,4 @@ object DatabaseModule {
 
     @Provides
     fun provideTokenDao(db: HubDatabase): TokenDao = db.tokens()
-
-    @Provides
-    fun providePluginDao(db: HubDatabase): PluginDao = db.plugins()
 }

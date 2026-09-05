@@ -256,5 +256,3 @@ private fun ApprovalRow(
     }
 }
 
-@Composable
-private fun stringRes(id: Int): String = androidx.compose.ui.res.stringResource(id = id)
