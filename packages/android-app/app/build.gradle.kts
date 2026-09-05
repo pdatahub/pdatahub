@@ -91,14 +91,6 @@ dependencies {
     ksp(libs.androidx.room.compiler)
     implementation(libs.sqlcipher.android)
 
-    // Ktor (local HTTP server for MCP endpoints)
-    implementation(libs.ktor.server.core)
-    implementation(libs.ktor.server.netty)
-    implementation(libs.ktor.server.content.negotiation)
-    implementation(libs.ktor.server.call.logging)
-    implementation(libs.ktor.server.status.pages)
-    implementation(libs.ktor.serialization.kotlinx.json)
-
     // OkHttp (WebSocket client to Cloudflare relay)
     implementation(libs.okhttp)
     implementation(libs.okhttp.logging)
