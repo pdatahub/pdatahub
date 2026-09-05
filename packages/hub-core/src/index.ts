@@ -50,7 +50,7 @@ async function main(): Promise<void> {
   const tokens = new TokenVault(db, config.masterKey);
 
   // Initialize OAuth + approval stream
-  const oauth = new OAuthFlow(tokens);
+  const oauth = new OAuthFlow(tokens, config.oauthCallbackPort);
   const approval = new ApprovalStream({ timeoutMs: 60_000 });
 
   // Plugin registry

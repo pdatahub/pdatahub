@@ -21,7 +21,7 @@ import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import readline from 'node:readline';
-import type { ToolDefinition } from '@pdatahub/plugin-sdk';
+import type { OAuthConfig, PluginManifest } from '@pdatahub/plugin-sdk';
 import type {
   PluginOAuthConfig,
   PluginProcessInfo,
@@ -47,14 +47,6 @@ interface JsonRpcNotification {
   jsonrpc: '2.0';
   method: string;
   params?: unknown;
-}
-
-interface PluginManifest {
-  name: string;
-  version: string;
-  description: string;
-  tools: ToolDefinition[];
-  oauth?: PluginOAuthConfig;
 }
 
 export interface ToolCallResult {
@@ -156,9 +148,9 @@ export class PluginProcess {
       ...this.info,
       name: result.name,
       version: result.version,
-      description: result.description,
+      description: result.description ?? '',
       tools,
-      oauth: result.oauth,
+      oauth: result.oauth ? mapSdkOauthToHub(result.oauth) : undefined,
     };
     this.notify('notifications/initialized', {});
     logger.info('plugin initialized', {
@@ -379,4 +371,14 @@ export class PluginRegistry {
   async shutdownAll(): Promise<void> {
     await Promise.all(Array.from(this.plugins.values()).map((p) => p.shutdown()));
   }
+}
+
+function mapSdkOauthToHub(sdk: OAuthConfig): PluginOAuthConfig {
+  return {
+    authorization_url: sdk.authorizationUrl,
+    token_url: sdk.tokenUrl,
+    scopes: sdk.scopes,
+    ...(sdk.tokenMethod !== undefined ? { token_method: sdk.tokenMethod } : {}),
+    ...(sdk.extraTokenParams !== undefined ? { extra_token_params: sdk.extraTokenParams } : {}),
+  };
 }

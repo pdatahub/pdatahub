@@ -3,14 +3,18 @@
  *
  * Usage:
  *   pdatahub-hub [--port 8080] [--db-path ./hub.db] [--master-key <hex>]
+ *                [--oauth-callback-port 8081]
  *
  * Env vars:
- *   HUB_PORT              default 8080
- *   HUB_DB_PATH           default ./pdatahub-hub.db
- *   HUB_MASTER_KEY        32-byte hex (64 chars). If absent, derived from passphrase.
- *   HUB_PASSPHRASE        Used to derive master key if HUB_MASTER_KEY not set.
- *   HUB_HOST              default 0.0.0.0 (binds all interfaces)
- *   HUB_LOG_LEVEL         default 'info'
+ *   HUB_PORT                    default 8080
+ *   HUB_DB_PATH                 default ./pdatahub-hub.db
+ *   HUB_MASTER_KEY              32-byte hex (64 chars). If absent, derived from passphrase.
+ *   HUB_PASSPHRASE              Used to derive master key if HUB_MASTER_KEY not set.
+ *   HUB_HOST                    default 0.0.0.0 (binds all interfaces)
+ *   HUB_LOG_LEVEL               default 'info'
+ *   HUB_OAUTH_CALLBACK_PORT     default 0 (= random free port). Set fixed port when
+ *                               registering OAuth redirect URIs with providers that
+ *                               require exact match (e.g. Google Web-app clients).
  */
 
 import { logger } from './logger.js';
@@ -32,6 +36,11 @@ export interface HubConfig {
   pluginIdleTimeoutMs: number;
   /** Plugin subprocess heartbeat interval (ms). */
   pluginHeartbeatMs: number;
+  /**
+   * OAuth callback server port. 0 = random free port per flow (RFC 8252 §7.3).
+   * Set fixed when OAuth provider requires exact redirect_uri match (Google Web-app).
+   */
+  oauthCallbackPort: number;
 }
 
 interface CliArgs {
@@ -42,6 +51,7 @@ interface CliArgs {
   passphrase?: string;
   'log-level'?: 'debug' | 'info' | 'warn' | 'error';
   'plugins-dir'?: string;
+  'oauth-callback-port'?: number;
 }
 
 function parseArgs(argv: string[]): CliArgs {
@@ -63,6 +73,7 @@ function parseArgs(argv: string[]): CliArgs {
       case 'passphrase': out.passphrase = next; i++; break;
       case 'log-level': out['log-level'] = next as CliArgs['log-level']; i++; break;
       case 'plugins-dir': out['plugins-dir'] = next; i++; break;
+      case 'oauth-callback-port': out['oauth-callback-port'] = parseInt(next, 10); i++; break;
       default: break;
     }
   }
@@ -85,6 +96,11 @@ export function loadConfig(argv: string[] = process.argv.slice(2)): HubConfig {
   const dbPath = args['db-path'] ?? process.env.HUB_DB_PATH ?? './pdatahub-hub.db';
   const logLevel = args['log-level'] ?? (process.env.HUB_LOG_LEVEL as HubConfig['logLevel']) ?? 'info';
   const pluginsDir = args['plugins-dir'] ?? process.env.HUB_PLUGINS_DIR ?? './plugins';
+  const oauthCallbackPort =
+    args['oauth-callback-port'] ??
+    (process.env.HUB_OAUTH_CALLBACK_PORT !== undefined
+      ? parseInt(process.env.HUB_OAUTH_CALLBACK_PORT, 10)
+      : 0);
 
   const masterKeyHex = args['master-key'] ?? process.env.HUB_MASTER_KEY;
   const passphrase = args.passphrase ?? process.env.HUB_PASSPHRASE;
@@ -111,5 +127,6 @@ export function loadConfig(argv: string[] = process.argv.slice(2)): HubConfig {
     pluginsDir,
     pluginIdleTimeoutMs: 5 * 60_000, // 5 min
     pluginHeartbeatMs: 30_000, // 30 sec
+    oauthCallbackPort,
   };
 }

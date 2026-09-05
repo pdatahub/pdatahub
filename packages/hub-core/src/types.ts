@@ -179,14 +179,16 @@ export interface PluginProcessInfo {
 }
 
 /**
- * Plugin manifest OAuth config. Plugin declares, Hub stores secrets.
+ * Plugin manifest OAuth config. Plugin declares (in SDK OAuthConfig camelCase),
+ * Hub stores secrets. snake_case here for hub-core internal convention.
  */
 export interface PluginOAuthConfig {
   authorization_url: string;
   token_url: string;
   scopes: string[];
-  /** Optional: for PKCE-enabled flows. */
   use_pkce?: boolean;
+  token_method?: 'GET' | 'POST';
+  extra_token_params?: Record<string, string>;
 }
 
 /* ─── Internal: approval stream (WebSocket to Android UI) ───────────────── */

@@ -12,8 +12,11 @@
  *   5. Hub: exchanges code → access_token + refresh_token
  *   6. Hub: stores tokens via TokenVault
  *
- * Loopback redirect: Hub starts a tiny HTTP server on a random port to receive
- * the callback. Matches RFC 8252 §7.3 for native apps.
+ * Loopback redirect: Hub starts a tiny HTTP server on a fixed port (when configured)
+ * or random free port (default). Matches RFC 8252 §7.3.
+ *
+ * startFlow() returns immediately with authorization_url. Token exchange happens
+ * asynchronously when the OAuth provider redirects back to /callback.
  */
 
 import { createServer, type Server } from 'node:http';
@@ -25,7 +28,7 @@ import { logger } from './logger.js';
 
 export interface PluginClientConfig {
   client_id: string;
-  client_secret?: string; // Optional for public clients (PKCE-only)
+  client_secret?: string;
 }
 
 export interface OAuthStartResult {
@@ -37,7 +40,7 @@ export interface OAuthStartResult {
 export interface OAuthTokens {
   access_token: string;
   refresh_token?: string;
-  expires_in?: number; // seconds
+  expires_in?: number;
   scope?: string;
   token_type?: string;
 }
@@ -54,25 +57,37 @@ export class OAuthFlow {
     server: Server;
   }>();
 
-  constructor(private readonly tokenVault: TokenVault) {}
+  constructor(
+    private readonly tokenVault: TokenVault,
+    private readonly fixedCallbackPort: number = 0,
+  ) {}
 
-  /**
-   * Start OAuth flow: generate state, spin up loopback callback server, return auth URL.
-   * Caller (Hub UI or server) redirects user to authorization_url.
-   */
   async startFlow(opts: {
     plugin: string;
     oauth: PluginOAuthConfig;
     client: PluginClientConfig;
   }): Promise<OAuthStartResult> {
     const state = randomBytes(16).toString('hex');
-    const callback_port = await this.getFreePort();
+    const callback_port = this.fixedCallbackPort > 0
+      ? this.fixedCallbackPort
+      : await this.getFreePort();
 
     const server = createServer((req, res) => {
       void this.handleCallback(req, res, state);
     });
     await new Promise<void>((resolve, reject) => {
-      server.once('error', reject);
+      server.once('error', (err: NodeJS.ErrnoException) => {
+        if (err.code === 'EADDRINUSE' && this.fixedCallbackPort > 0) {
+          reject(new Error(
+            `OAuth callback port ${this.fixedCallbackPort} is already in use ` +
+            `(likely from a previous OAuth flow that hasn't completed yet). ` +
+            `Either wait 5 minutes for the abandoned flow to time out, ` +
+            `or restart hub-core, or set --oauth-callback-port 0 to use a random port.`
+          ));
+        } else {
+          reject(err);
+        }
+      });
       server.listen(callback_port, '127.0.0.1', () => resolve());
     });
 
@@ -91,11 +106,14 @@ export class OAuthFlow {
         code_challenge: codeChallenge,
         code_challenge_method: 'S256',
       } : {}),
+      ...(opts.oauth.extra_token_params ?? {}),
     });
 
     const authorization_url = `${opts.oauth.authorization_url}?${params}`;
 
-    return new Promise<OAuthStartResult>((resolveStart, rejectStart) => {
+    return new Promise<OAuthStartResult>((resolveStart) => {
+      resolveStart({ authorization_url, state, callback_port });
+
       const flow = {
         plugin: opts.plugin,
         oauth: opts.oauth,
@@ -109,7 +127,7 @@ export class OAuthFlow {
               client: opts.client,
               code,
               callback_port,
-              code_verifier: codeVerifier,
+              codeVerifier,
             });
             this.tokenVault.store({
               plugin: opts.plugin,
@@ -120,29 +138,27 @@ export class OAuthFlow {
               } : {}),
               scope: tokens.scope ?? opts.oauth.scopes.join(' '),
             });
-            resolveStart({
-              authorization_url,
-              state,
-              callback_port,
-            });
+            logger.info('OAuth tokens stored', { plugin: opts.plugin });
           } catch (err) {
-            rejectStart(err as Error);
+            logger.error('OAuth token exchange failed', {
+              plugin: opts.plugin,
+              error: (err as Error).message,
+            });
           } finally {
             this.cleanup(state);
           }
         },
         reject: (err: Error) => {
+          logger.warn('OAuth callback error', { plugin: opts.plugin, error: err.message });
           this.cleanup(state);
-          rejectStart(err);
         },
         server,
       };
       this.pendingFlows.set(state, flow);
-      // Timeout: 5 minutes
       setTimeout(() => {
         if (this.pendingFlows.has(state)) {
           this.cleanup(state);
-          rejectStart(new Error('OAuth flow timeout (5 min)'));
+          logger.warn('OAuth flow timeout (5 min)', { plugin: opts.plugin, state });
         }
       }, 5 * 60_000);
     });
@@ -203,7 +219,7 @@ export class OAuthFlow {
     client: PluginClientConfig;
     code: string;
     callback_port: number;
-    code_verifier: string | null;
+    codeVerifier: string | null;
   }): Promise<OAuthTokens> {
     const params = new URLSearchParams({
       grant_type: 'authorization_code',
@@ -211,11 +227,12 @@ export class OAuthFlow {
       redirect_uri: `http://127.0.0.1:${opts.callback_port}/callback`,
       client_id: opts.client.client_id,
       ...(opts.client.client_secret ? { client_secret: opts.client.client_secret } : {}),
-      ...(opts.code_verifier ? { code_verifier: opts.code_verifier } : {}),
+      ...(opts.codeVerifier ? { code_verifier: opts.codeVerifier } : {}),
+      ...(opts.oauth.extra_token_params ?? {}),
     });
 
     const res = await request(opts.oauth.token_url, {
-      method: 'POST',
+      method: opts.oauth.token_method ?? 'POST',
       headers: {
         'content-type': 'application/x-www-form-urlencoded',
         accept: 'application/json',
