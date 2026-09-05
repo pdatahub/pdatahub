@@ -8,6 +8,8 @@ import com.pdatahub.hub.data.db.PluginEntity
 import com.pdatahub.hub.data.identity.IdentityManager
 import com.pdatahub.hub.pairing.PairingManager
 import com.pdatahub.hub.plugin.PluginManager
+import com.pdatahub.hub.ui.approval.ApprovalNotificationManager
+import com.pdatahub.hub.ui.approval.PendingApprovalRequest
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -20,10 +22,13 @@ data class HomeUiState(
     val sessionToken: String? = null,
     val qrPayload: String? = null,
     val relayUrl: String = SettingsRepository.DEFAULT_RELAY_URL,
+    val hubCoreUrl: String = SettingsRepository.DEFAULT_HUB_CORE_URL,
     val tools: List<ToolItem> = emptyList(),
     val nodePathResolved: Boolean = false,
     val showInstallDialog: Boolean = false,
     val installError: String? = null,
+    val pendingApprovals: List<PendingApprovalRequest> = emptyList(),
+    val approvalStreamConnected: Boolean = false,
 )
 
 data class ToolItem(
@@ -40,6 +45,7 @@ class HomeViewModel @Inject constructor(
     private val plugins: PluginManager,
     private val pluginDao: PluginDao,
     private val settings: SettingsRepository,
+    private val approvalManager: ApprovalNotificationManager,
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(
@@ -47,6 +53,7 @@ class HomeViewModel @Inject constructor(
             publicKeyBase64 = identity.publicKeyBase64(),
             nodePathResolved = plugins.resolveNodePath() != null,
             relayUrl = settings.relayUrl,
+            hubCoreUrl = settings.hubCoreUrl,
         )
     )
     val state: StateFlow<HomeUiState> = _state.asStateFlow()
@@ -80,8 +87,19 @@ class HomeViewModel @Inject constructor(
         }
         viewModelScope.launch {
             pluginDao.observeAll().collect { entities ->
-                // Future: show installed plugins list with enable/disable toggles
                 _state.value = _state.value.copy(installError = null)
+            }
+        }
+        viewModelScope.launch {
+            approvalManager.pendingRequests.collect { requests ->
+                _state.value = _state.value.copy(pendingApprovals = requests)
+            }
+        }
+        viewModelScope.launch {
+            approvalManager.streamState.collect { streamState ->
+                _state.value = _state.value.copy(
+                    approvalStreamConnected = streamState.name == "CONNECTED",
+                )
             }
         }
     }
@@ -101,6 +119,11 @@ class HomeViewModel @Inject constructor(
         _state.value = _state.value.copy(relayUrl = url, qrPayload = qr)
     }
 
+    fun setHubCoreUrl(url: String) {
+        settings.hubCoreUrl = url
+        _state.value = _state.value.copy(hubCoreUrl = url)
+    }
+
     fun showInstallDialog() {
         _state.value = _state.value.copy(showInstallDialog = true, installError = null)
     }
@@ -109,12 +132,14 @@ class HomeViewModel @Inject constructor(
         _state.value = _state.value.copy(showInstallDialog = false)
     }
 
-    /**
-     * Install a plugin by absolute path to its entry point.
-     *
-     * Persists to [PluginDao] and restarts the subprocess registry so the
-     * plugin manifest becomes available via the MCP HTTP server.
-     */
+    fun approve(requestId: String) {
+        approvalManager.approve(requestId)
+    }
+
+    fun deny(requestId: String) {
+        approvalManager.deny(requestId)
+    }
+
     fun installPlugin(entryPath: String) {
         if (entryPath.isBlank()) {
             _state.value = _state.value.copy(installError = "Path is empty")
