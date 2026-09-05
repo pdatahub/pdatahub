@@ -3,11 +3,8 @@ package com.pdatahub.hub.ui.home
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.pdatahub.hub.data.SettingsRepository
-import com.pdatahub.hub.data.db.PluginDao
-import com.pdatahub.hub.data.db.PluginEntity
 import com.pdatahub.hub.data.identity.IdentityManager
 import com.pdatahub.hub.pairing.PairingManager
-import com.pdatahub.hub.plugin.PluginManager
 import com.pdatahub.hub.ui.approval.ApprovalNotificationManager
 import com.pdatahub.hub.ui.approval.PendingApprovalRequest
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -23,27 +20,14 @@ data class HomeUiState(
     val qrPayload: String? = null,
     val relayUrl: String = SettingsRepository.DEFAULT_RELAY_URL,
     val hubCoreUrl: String = SettingsRepository.DEFAULT_HUB_CORE_URL,
-    val tools: List<ToolItem> = emptyList(),
-    val nodePathResolved: Boolean = false,
-    val showInstallDialog: Boolean = false,
-    val installError: String? = null,
     val pendingApprovals: List<PendingApprovalRequest> = emptyList(),
     val approvalStreamConnected: Boolean = false,
-)
-
-data class ToolItem(
-    val pluginName: String,
-    val toolName: String,
-    val description: String,
-    val scope: String,
 )
 
 @HiltViewModel
 class HomeViewModel @Inject constructor(
     private val identity: IdentityManager,
     private val pairing: PairingManager,
-    private val plugins: PluginManager,
-    private val pluginDao: PluginDao,
     private val settings: SettingsRepository,
     private val approvalManager: ApprovalNotificationManager,
 ) : ViewModel() {
@@ -51,7 +35,6 @@ class HomeViewModel @Inject constructor(
     private val _state = MutableStateFlow(
         HomeUiState(
             publicKeyBase64 = identity.publicKeyBase64(),
-            nodePathResolved = plugins.resolveNodePath() != null,
             relayUrl = settings.relayUrl,
             hubCoreUrl = settings.hubCoreUrl,
         )
@@ -68,26 +51,6 @@ class HomeViewModel @Inject constructor(
                 }
                 val qr = token?.let { pairing.buildQrPayload(settings.relayUrl) }
                 _state.value = _state.value.copy(sessionToken = token, qrPayload = qr)
-            }
-        }
-        viewModelScope.launch {
-            plugins.manifests.collect { manifests ->
-                val tools = manifests.values.flatMap { manifest ->
-                    manifest.tools.map { tool ->
-                        ToolItem(
-                            pluginName = manifest.name,
-                            toolName = tool.name,
-                            description = tool.description,
-                            scope = tool.scope,
-                        )
-                    }
-                }
-                _state.value = _state.value.copy(tools = tools)
-            }
-        }
-        viewModelScope.launch {
-            pluginDao.observeAll().collect { entities ->
-                _state.value = _state.value.copy(installError = null)
             }
         }
         viewModelScope.launch {
@@ -124,51 +87,11 @@ class HomeViewModel @Inject constructor(
         _state.value = _state.value.copy(hubCoreUrl = url)
     }
 
-    fun showInstallDialog() {
-        _state.value = _state.value.copy(showInstallDialog = true, installError = null)
-    }
-
-    fun dismissInstallDialog() {
-        _state.value = _state.value.copy(showInstallDialog = false)
-    }
-
     fun approve(requestId: String) {
         approvalManager.approve(requestId)
     }
 
     fun deny(requestId: String) {
         approvalManager.deny(requestId)
-    }
-
-    fun installPlugin(entryPath: String) {
-        if (entryPath.isBlank()) {
-            _state.value = _state.value.copy(installError = "Path is empty")
-            return
-        }
-        viewModelScope.launch {
-            try {
-                val name = entryPath.substringAfterLast('/').substringBeforeLast('.')
-                    .ifBlank { "plugin-${System.currentTimeMillis()}" }
-                val entity = PluginEntity(
-                    name = name,
-                    version = "0.1.0",
-                    entryPath = entryPath,
-                    enabled = true,
-                    installedAt = System.currentTimeMillis(),
-                    configJson = "{}",
-                )
-                pluginDao.upsert(entity)
-                plugins.refreshInstalled()
-                _state.value = _state.value.copy(showInstallDialog = false, installError = null)
-            } catch (e: Throwable) {
-                _state.value = _state.value.copy(installError = e.message ?: "Install failed")
-            }
-        }
-    }
-
-    fun refreshTools() {
-        viewModelScope.launch {
-            plugins.refreshInstalled()
-        }
     }
 }

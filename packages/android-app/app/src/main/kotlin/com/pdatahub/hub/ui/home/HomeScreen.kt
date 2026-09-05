@@ -13,21 +13,14 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
-import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -37,19 +30,16 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.pdatahub.hub.R
 import com.pdatahub.hub.pairing.QrRenderer
+import com.pdatahub.hub.ui.approval.PendingApprovalRequest
 
 @Composable
 fun HomeScreen(
     state: HomeUiState,
-    onStartServer: () -> Unit,
-    onStopServer: () -> Unit,
     onPairingToggle: () -> Unit,
     onRelayUrlChange: (String) -> Unit,
-    onRefreshTools: () -> Unit,
-    onInstallPlugin: (String) -> Unit,
-    showInstallDialog: Boolean,
-    onShowInstallDialog: () -> Unit,
-    onDismissInstallDialog: () -> Unit,
+    onHubCoreUrlChange: (String) -> Unit,
+    onApprove: (String) -> Unit,
+    onDeny: (String) -> Unit,
 ) {
     Column(
         modifier = Modifier
@@ -59,21 +49,21 @@ fun HomeScreen(
         verticalArrangement = Arrangement.spacedBy(20.dp),
     ) {
         Text(
-            text = stringRes(R.string.hub_title),
+            text = "pdatahub",
             style = MaterialTheme.typography.headlineMedium,
         )
         Text(
-            text = stringRes(R.string.hub_subtitle),
+            text = "Personal Data Hub — Android UI client. Hub core (Node.js) runs on your laptop.",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
 
         IdentityCard(publicKeyBase64 = state.publicKeyBase64)
 
-        ServerControlCard(
-            nodePathResolved = state.nodePathResolved,
-            onStart = onStartServer,
-            onStop = onStopServer,
+        HubCoreCard(
+            hubCoreUrl = state.hubCoreUrl,
+            connected = state.approvalStreamConnected,
+            onHubCoreUrlChange = onHubCoreUrlChange,
         )
 
         PairingCard(
@@ -84,21 +74,11 @@ fun HomeScreen(
             onRelayUrlChange = onRelayUrlChange,
         )
 
-        PluginsCard(
-            tools = state.tools,
-            onRefresh = onRefreshTools,
-            onAdd = onShowInstallDialog,
+        PendingApprovalsCard(
+            approvals = state.pendingApprovals,
+            onApprove = onApprove,
+            onDeny = onDeny,
         )
-
-        if (showInstallDialog) {
-            InstallPluginDialog(
-                onDismiss = onDismissInstallDialog,
-                onInstall = { path ->
-                    onInstallPlugin(path)
-                    onDismissInstallDialog()
-                },
-            )
-        }
     }
 }
 
@@ -106,7 +86,7 @@ fun HomeScreen(
 private fun IdentityCard(publicKeyBase64: String) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(text = stringRes(R.string.hub_public_key_label), style = MaterialTheme.typography.titleSmall)
+            Text(text = "Identity", style = MaterialTheme.typography.titleSmall)
             Text(
                 text = publicKeyBase64.ifBlank { "(not yet generated)" },
                 style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
@@ -116,28 +96,38 @@ private fun IdentityCard(publicKeyBase64: String) {
 }
 
 @Composable
-private fun ServerControlCard(
-    nodePathResolved: Boolean,
-    onStart: () -> Unit,
-    onStop: () -> Unit,
+private fun HubCoreCard(
+    hubCoreUrl: String,
+    connected: Boolean,
+    onHubCoreUrlChange: (String) -> Unit,
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = onStart, enabled = nodePathResolved) {
-                    Text(stringRes(R.string.hub_status_start))
-                }
-                OutlinedButton(onClick = onStop) {
-                    Text(stringRes(R.string.hub_status_stop))
-                }
-            }
-            if (!nodePathResolved) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    text = "`node` binary not found. Install via Termux and set the path in settings.",
+                    text = "Hub core",
+                    style = MaterialTheme.typography.titleSmall,
+                    modifier = Modifier.weight(1f),
+                )
+                Text(
+                    text = if (connected) "● connected" else "○ disconnected",
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error,
+                    color = if (connected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
                 )
             }
+            Text(
+                text = "Node.js process running on your laptop (ws://laptop:8090).",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            OutlinedTextField(
+                value = hubCoreUrl,
+                onValueChange = onHubCoreUrlChange,
+                label = { Text("Hub core URL") },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                modifier = Modifier.fillMaxWidth(),
+            )
         }
     }
 }
@@ -150,12 +140,12 @@ private fun PairingCard(
     onToggle: () -> Unit,
     onRelayUrlChange: (String) -> Unit,
 ) {
-    val qrBitmap = remember(qrPayload) { qrPayload?.let { QrRenderer.render(it) } }
+    val qrBitmap = qrPayload?.let { QrRenderer.render(it) }
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text(text = stringRes(R.string.hub_pairing_title), style = MaterialTheme.typography.titleSmall)
+            Text(text = "Pairing (Cloudflare Relay)", style = MaterialTheme.typography.titleSmall)
             Text(
-                text = stringRes(R.string.hub_pairing_subtitle),
+                text = "Scan QR code with pdatahub-mcp on your laptop to pair this device.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -197,99 +187,73 @@ private fun PairingCard(
 }
 
 @Composable
-private fun PluginsCard(
-    tools: List<ToolItem>,
-    onRefresh: () -> Unit,
-    onAdd: () -> Unit,
+private fun PendingApprovalsCard(
+    approvals: List<PendingApprovalRequest>,
+    onApprove: (String) -> Unit,
+    onDeny: (String) -> Unit,
 ) {
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
+    val containerColor = if (approvals.isEmpty()) {
+        MaterialTheme.colorScheme.surface
+    } else {
+        MaterialTheme.colorScheme.primaryContainer
+    }
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = containerColor),
+    ) {
+        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text(text = "Pending approvals", style = MaterialTheme.typography.titleSmall)
+            if (approvals.isEmpty()) {
                 Text(
-                    text = stringRes(R.string.hub_tools_label),
-                    style = MaterialTheme.typography.titleSmall,
-                )
-                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    OutlinedButton(onClick = onRefresh) { Text("Refresh") }
-                    Button(onClick = onAdd) { Text("Add") }
-                }
-            }
-            HorizontalDivider()
-            if (tools.isEmpty()) {
-                Text(
-                    text = stringRes(R.string.hub_tools_empty),
+                    text = "No pending requests.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             } else {
-                tools.forEach { tool -> ToolRow(tool = tool) }
+                approvals.forEach { request ->
+                    ApprovalRow(
+                        request = request,
+                        onApprove = onApprove,
+                        onDeny = onDeny,
+                    )
+                }
             }
         }
     }
 }
 
 @Composable
-private fun ToolRow(tool: ToolItem) {
-    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+private fun ApprovalRow(
+    request: PendingApprovalRequest,
+    onApprove: (String) -> Unit,
+    onDeny: (String) -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Text(
-            text = "${tool.pluginName} :: ${tool.toolName}",
+            text = "${request.agentId} → ${request.toolName}",
             style = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
         )
         Text(
-            text = tool.description,
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        Text(
-            text = "scope: ${tool.scope}",
+            text = "scope: ${request.scope}",
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.primary,
         )
+        if (request.justification != null) {
+            Text(
+                text = request.justification,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(onClick = { onApprove(request.requestId) }) {
+                Text("Approve")
+            }
+            OutlinedButton(onClick = { onDeny(request.requestId) }) {
+                Text("Deny")
+            }
+        }
     }
-}
-
-@Composable
-private fun InstallPluginDialog(
-    onDismiss: () -> Unit,
-    onInstall: (String) -> Unit,
-) {
-    var path by rememberSaveable { mutableStateOf("") }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Install plugin") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(
-                    "Absolute path to plugin entry point (e.g. /data/data/com.termux/files/home/.npm-global/lib/node_modules/pdatahub-plugin-google-calendar/dist/index.js)",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                OutlinedTextField(
-                    value = path,
-                    onValueChange = { path = it },
-                    label = { Text("Plugin path") },
-                    singleLine = false,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
-                    modifier = Modifier.fillMaxWidth(),
-                )
-            }
-        },
-        confirmButton = {
-            TextButton(
-                onClick = { onInstall(path.trim()) },
-                enabled = path.isNotBlank(),
-            ) {
-                Text("Install")
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Cancel") }
-        },
-    )
 }
 
 @Composable
