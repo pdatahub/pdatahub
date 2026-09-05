@@ -33,6 +33,9 @@ class MainActivity : AppCompatActivity() {
                         onBiometricEnabledChange = { viewModel.setBiometricEnabled(it) },
                         onApprove = { viewModel.approve(it) },
                         onDeny = { viewModel.deny(it) },
+                        onLoadGrants = { viewModel.loadGrants() },
+                        onRevokeGrant = { viewModel.revokeGrant(it) },
+                        onLoadAuditHistory = { viewModel.loadAuditHistory() },
                     )
                 }
             }

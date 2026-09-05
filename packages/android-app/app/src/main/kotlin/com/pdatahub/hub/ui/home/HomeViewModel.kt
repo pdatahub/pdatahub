@@ -4,6 +4,9 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.pdatahub.hub.data.SettingsRepository
 import com.pdatahub.hub.data.identity.IdentityManager
+import com.pdatahub.hub.mcp.AuditEntry
+import com.pdatahub.hub.mcp.Grant
+import com.pdatahub.hub.mcp.HubCoreApi
 import com.pdatahub.hub.pairing.PairingManager
 import com.pdatahub.hub.ui.approval.ApprovalNotificationManager
 import com.pdatahub.hub.ui.approval.PendingApprovalRequest
@@ -23,6 +26,8 @@ data class HomeUiState(
     val biometricEnabled: Boolean = true,
     val pendingApprovals: List<PendingApprovalRequest> = emptyList(),
     val approvalStreamConnected: Boolean = false,
+    val activeGrants: List<Grant> = emptyList(),
+    val auditHistory: List<AuditEntry> = emptyList(),
 )
 
 @HiltViewModel
@@ -31,6 +36,7 @@ class HomeViewModel @Inject constructor(
     private val pairing: PairingManager,
     private val settings: SettingsRepository,
     private val approvalManager: ApprovalNotificationManager,
+    private val hubCoreApi: HubCoreApi,
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(
@@ -67,6 +73,37 @@ class HomeViewModel @Inject constructor(
                 )
             }
         }
+        viewModelScope.launch {
+            approvalManager.events.collect { event ->
+                when (event) {
+                    is com.pdatahub.hub.mcp.ApprovalStreamEvent.GrantRevoked -> {
+                        _state.value = _state.value.copy(
+                            activeGrants = _state.value.activeGrants.filterNot {
+                                it.grant_id == event.grant_id
+                            },
+                        )
+                    }
+                    is com.pdatahub.hub.mcp.ApprovalStreamEvent.AuditUpdate -> {
+                        val p = event.entry
+                        val entry = AuditEntry(
+                            id = p.id,
+                            timestamp = p.timestamp,
+                            agent_id = p.agent_id,
+                            user_id = "local-user",
+                            tool_name = p.tool_name,
+                            plugin = "",
+                            scope = "",
+                            decision = p.decision,
+                            duration_ms = 0,
+                        )
+                        val updated: List<AuditEntry> = listOf(entry) + _state.value.auditHistory
+                        _state.value = _state.value.copy(auditHistory = updated.take(50))
+                    }
+                    else -> Unit
+                }
+            }
+        }
+        loadGrants()
     }
 
     fun togglePairing() {
@@ -100,5 +137,39 @@ class HomeViewModel @Inject constructor(
 
     fun deny(requestId: String) {
         approvalManager.deny(requestId)
+    }
+
+    fun loadGrants() {
+        viewModelScope.launch {
+            try {
+                _state.value = _state.value.copy(activeGrants = hubCoreApi.getGrants())
+            } catch (_: Throwable) {
+                // Hub core unreachable — leave list as-is
+            }
+        }
+    }
+
+    fun revokeGrant(grantId: String) {
+        viewModelScope.launch {
+            try {
+                if (hubCoreApi.revokeGrant(grantId)) {
+                    _state.value = _state.value.copy(
+                        activeGrants = _state.value.activeGrants.filterNot {
+                            it.grant_id == grantId
+                        },
+                    )
+                }
+            } catch (_: Throwable) {
+            }
+        }
+    }
+
+    fun loadAuditHistory(limit: Int = 50) {
+        viewModelScope.launch {
+            try {
+                _state.value = _state.value.copy(auditHistory = hubCoreApi.getAuditHistory(limit))
+            } catch (_: Throwable) {
+            }
+        }
     }
 }

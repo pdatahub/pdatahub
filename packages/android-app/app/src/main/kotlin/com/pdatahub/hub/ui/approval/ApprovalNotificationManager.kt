@@ -7,22 +7,13 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 import javax.inject.Singleton
 
-/**
- * High-level UI-facing wrapper around [ApprovalWebSocketClient].
- *
- * Maintains the list of pending approval requests so the Compose UI can
- * observe them. Approve/deny decisions are forwarded to the WebSocket
- * client which sends them back to Hub core.
- *
- * Note: biometric prompt integration is a TODO for a future iteration.
- * For MVP, calling [approve] or [deny] immediately sends the decision.
- */
 @Singleton
 class ApprovalNotificationManager @Inject constructor(
     private val webSocketClient: ApprovalWebSocketClient,
@@ -33,6 +24,8 @@ class ApprovalNotificationManager @Inject constructor(
     val pendingRequests: StateFlow<List<PendingApprovalRequest>> = _pendingRequests.asStateFlow()
 
     val streamState: StateFlow<ApprovalStreamState> = webSocketClient.state
+
+    val events: SharedFlow<ApprovalStreamEvent> = webSocketClient.events
 
     init {
         scope.launch {
@@ -53,9 +46,7 @@ class ApprovalNotificationManager @Inject constructor(
                             it.requestId == event.grant_id
                         }
                     }
-                    is ApprovalStreamEvent.AuditUpdate -> {
-                        // UI can react to audit updates via its own observer if needed
-                    }
+                    is ApprovalStreamEvent.AuditUpdate -> Unit
                 }
             }
         }

@@ -32,6 +32,8 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.fragment.app.FragmentActivity
+import com.pdatahub.hub.mcp.AuditEntry
+import com.pdatahub.hub.mcp.Grant
 import com.pdatahub.hub.pairing.QrRenderer
 import com.pdatahub.hub.security.BiometricHelper
 import com.pdatahub.hub.ui.approval.PendingApprovalRequest
@@ -45,6 +47,9 @@ fun HomeScreen(
     onBiometricEnabledChange: (Boolean) -> Unit,
     onApprove: (String) -> Unit,
     onDeny: (String) -> Unit,
+    onLoadGrants: () -> Unit,
+    onRevokeGrant: (String) -> Unit,
+    onLoadAuditHistory: () -> Unit,
 ) {
     Column(
         modifier = Modifier
@@ -86,6 +91,125 @@ fun HomeScreen(
             biometricEnabled = state.biometricEnabled,
             onApprove = onApprove,
             onDeny = onDeny,
+        )
+
+        ActiveGrantsCard(
+            grants = state.activeGrants,
+            onLoad = onLoadGrants,
+            onRevoke = onRevokeGrant,
+        )
+
+        AuditHistoryCard(
+            entries = state.auditHistory,
+            onLoad = onLoadAuditHistory,
+        )
+    }
+}
+
+@Composable
+private fun ActiveGrantsCard(
+    grants: List<Grant>,
+    onLoad: () -> Unit,
+    onRevoke: (String) -> Unit,
+) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "Active grants",
+                    style = MaterialTheme.typography.titleSmall,
+                )
+                OutlinedButton(onClick = onLoad) { Text("Refresh") }
+            }
+            if (grants.isEmpty()) {
+                Text(
+                    text = "No active grants. Tap Refresh after approving a request.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            } else {
+                grants.forEach { grant ->
+                    GrantRow(grant = grant, onRevoke = { onRevoke(grant.grant_id) })
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun GrantRow(grant: Grant, onRevoke: () -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(
+            text = "${grant.plugin} :: ${grant.tool_name}",
+            style = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
+        )
+        Text(
+            text = "scope: ${grant.scope} · agent: ${grant.agent_id}",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.primary,
+        )
+        Text(
+            text = "expires: ${grant.expires_at}",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        OutlinedButton(onClick = onRevoke) { Text("Revoke") }
+    }
+}
+
+@Composable
+private fun AuditHistoryCard(
+    entries: List<AuditEntry>,
+    onLoad: () -> Unit,
+) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "Audit history",
+                    style = MaterialTheme.typography.titleSmall,
+                )
+                OutlinedButton(onClick = onLoad) { Text("Load history") }
+            }
+            if (entries.isEmpty()) {
+                Text(
+                    text = "Tap Load history to fetch from /v1/audit?limit=50.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            } else {
+                entries.forEach { entry -> AuditRow(entry = entry) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AuditRow(entry: AuditEntry) {
+    val color = when (entry.decision) {
+        "approved" -> MaterialTheme.colorScheme.primary
+        "denied", "revoked" -> MaterialTheme.colorScheme.error
+        "error" -> MaterialTheme.colorScheme.error
+        else -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Text(
+            text = "${entry.timestamp} · ${entry.plugin} :: ${entry.tool_name}",
+            style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+        )
+        Text(
+            text = "${entry.decision} · scope: ${entry.scope} · agent: ${entry.agent_id}" +
+                (entry.error?.let { " · error: $it" } ?: ""),
+            style = MaterialTheme.typography.labelSmall,
+            color = color,
         )
     }
 }
