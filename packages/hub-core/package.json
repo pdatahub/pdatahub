@@ -1,0 +1,46 @@
+{
+  "name": "@pdatahub/hub-core",
+  "version": "0.1.0",
+  "description": "pdatahub Hub core — approval engine, token vault, audit log, plugin subprocess manager (Node.js, replaces Kotlin McpHttpServer/PluginManager)",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "pdatahub-hub": "dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "echo 'lint TBD'",
+    "dev": "tsc --watch",
+    "clean": "rm -rf dist coverage"
+  },
+  "keywords": [
+    "pdatahub",
+    "hub",
+    "mcp",
+    "approval",
+    "plugin-runtime"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "@pdatahub/plugin-sdk": "https://github.com/pdatahub/pdatahub/releases/download/v0.1.0/pdatahub-plugin-sdk-0.1.0.tgz",
+    "better-sqlite3": "^11.5.0",
+    "undici": "^6.0.0",
+    "ws": "^8.18.0",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.11",
+    "@types/node": "^20.0.0",
+    "@types/ws": "^8.5.12",
+    "typescript": "^5.4.0",
+    "vitest": "^1.6.0"
+  }
+}
