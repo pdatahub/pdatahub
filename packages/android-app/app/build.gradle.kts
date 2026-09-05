@@ -80,6 +80,9 @@ dependencies {
     implementation(libs.androidx.compose.material.icons.extended)
     debugImplementation(libs.androidx.compose.ui.tooling)
 
+    // Biometric (for Approve/Deny confirmation)
+    implementation(libs.androidx.biometric)
+
     // Hilt DI
     implementation(libs.hilt.android)
     implementation(libs.androidx.hilt.navigation.compose)

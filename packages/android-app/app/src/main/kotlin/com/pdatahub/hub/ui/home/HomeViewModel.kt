@@ -20,6 +20,7 @@ data class HomeUiState(
     val qrPayload: String? = null,
     val relayUrl: String = SettingsRepository.DEFAULT_RELAY_URL,
     val hubCoreUrl: String = SettingsRepository.DEFAULT_HUB_CORE_URL,
+    val biometricEnabled: Boolean = true,
     val pendingApprovals: List<PendingApprovalRequest> = emptyList(),
     val approvalStreamConnected: Boolean = false,
 )
@@ -37,6 +38,7 @@ class HomeViewModel @Inject constructor(
             publicKeyBase64 = identity.publicKeyBase64(),
             relayUrl = settings.relayUrl,
             hubCoreUrl = settings.hubCoreUrl,
+            biometricEnabled = settings.biometricEnabled,
         )
     )
     val state: StateFlow<HomeUiState> = _state.asStateFlow()
@@ -85,6 +87,11 @@ class HomeViewModel @Inject constructor(
     fun setHubCoreUrl(url: String) {
         settings.hubCoreUrl = url
         _state.value = _state.value.copy(hubCoreUrl = url)
+    }
+
+    fun setBiometricEnabled(enabled: Boolean) {
+        settings.biometricEnabled = enabled
+        _state.value = _state.value.copy(biometricEnabled = enabled)
     }
 
     fun approve(requestId: String) {

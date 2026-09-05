@@ -19,17 +19,21 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
-import com.pdatahub.hub.R
+import androidx.fragment.app.FragmentActivity
 import com.pdatahub.hub.pairing.QrRenderer
+import com.pdatahub.hub.security.BiometricHelper
 import com.pdatahub.hub.ui.approval.PendingApprovalRequest
 
 @Composable
@@ -38,6 +42,7 @@ fun HomeScreen(
     onPairingToggle: () -> Unit,
     onRelayUrlChange: (String) -> Unit,
     onHubCoreUrlChange: (String) -> Unit,
+    onBiometricEnabledChange: (Boolean) -> Unit,
     onApprove: (String) -> Unit,
     onDeny: (String) -> Unit,
 ) {
@@ -63,7 +68,9 @@ fun HomeScreen(
         HubCoreCard(
             hubCoreUrl = state.hubCoreUrl,
             connected = state.approvalStreamConnected,
+            biometricEnabled = state.biometricEnabled,
             onHubCoreUrlChange = onHubCoreUrlChange,
+            onBiometricEnabledChange = onBiometricEnabledChange,
         )
 
         PairingCard(
@@ -76,6 +83,7 @@ fun HomeScreen(
 
         PendingApprovalsCard(
             approvals = state.pendingApprovals,
+            biometricEnabled = state.biometricEnabled,
             onApprove = onApprove,
             onDeny = onDeny,
         )
@@ -99,8 +107,16 @@ private fun IdentityCard(publicKeyBase64: String) {
 private fun HubCoreCard(
     hubCoreUrl: String,
     connected: Boolean,
+    biometricEnabled: Boolean,
     onHubCoreUrlChange: (String) -> Unit,
+    onBiometricEnabledChange: (Boolean) -> Unit,
 ) {
+    val context = LocalContext.current
+    val activity = remember(context) { context as? FragmentActivity }
+    val biometricAvailable = remember(activity) {
+        activity?.let { BiometricHelper.canAuthenticate(it) } ?: false
+    }
+
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -128,6 +144,31 @@ private fun HubCoreCard(
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
                 modifier = Modifier.fillMaxWidth(),
             )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Require biometric for approvals",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    Text(
+                        text = if (biometricAvailable) {
+                            "Fingerprint or face required before Approve/Deny fires."
+                        } else {
+                            "Not available on this device (no fingerprint/face enrolled). Buttons work directly."
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(
+                    checked = biometricEnabled && biometricAvailable,
+                    onCheckedChange = onBiometricEnabledChange,
+                    enabled = biometricAvailable,
+                )
+            }
         }
     }
 }
@@ -189,6 +230,7 @@ private fun PairingCard(
 @Composable
 private fun PendingApprovalsCard(
     approvals: List<PendingApprovalRequest>,
+    biometricEnabled: Boolean,
     onApprove: (String) -> Unit,
     onDeny: (String) -> Unit,
 ) {
@@ -213,6 +255,7 @@ private fun PendingApprovalsCard(
                 approvals.forEach { request ->
                     ApprovalRow(
                         request = request,
+                        biometricEnabled = biometricEnabled,
                         onApprove = onApprove,
                         onDeny = onDeny,
                     )
@@ -225,9 +268,30 @@ private fun PendingApprovalsCard(
 @Composable
 private fun ApprovalRow(
     request: PendingApprovalRequest,
+    biometricEnabled: Boolean,
     onApprove: (String) -> Unit,
     onDeny: (String) -> Unit,
 ) {
+    val context = LocalContext.current
+    val activity = remember(context) { context as? FragmentActivity }
+    val biometricAvailable = remember(activity) {
+        activity?.let { BiometricHelper.canAuthenticate(it) } ?: false
+    }
+
+    fun fire(approved: Boolean) {
+        val action = { if (approved) onApprove(request.requestId) else onDeny(request.requestId) }
+        if (biometricEnabled && biometricAvailable && activity != null) {
+            BiometricHelper.prompt(
+                activity = activity,
+                subtitle = "${if (approved) "Approve" else "Deny"} ${request.toolName}",
+                onSuccess = action,
+                onFailure = { /* user cancelled — no action */ },
+            )
+        } else {
+            action()
+        }
+    }
+
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Text(
             text = "${request.agentId} → ${request.toolName}",
@@ -246,13 +310,12 @@ private fun ApprovalRow(
             )
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = { onApprove(request.requestId) }) {
+            Button(onClick = { fire(true) }) {
                 Text("Approve")
             }
-            OutlinedButton(onClick = { onDeny(request.requestId) }) {
+            OutlinedButton(onClick = { fire(false) }) {
                 Text("Deny")
             }
         }
     }
 }
-

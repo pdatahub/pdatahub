@@ -1,9 +1,9 @@
 package com.pdatahub.hub
 
 import android.os.Bundle
-import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.appcompat.app.AppCompatActivity
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.collectAsState
@@ -16,7 +16,7 @@ import com.pdatahub.hub.ui.theme.PdatahubTheme
 import dagger.hilt.android.AndroidEntryPoint
 
 @AndroidEntryPoint
-class MainActivity : ComponentActivity() {
+class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -30,6 +30,7 @@ class MainActivity : ComponentActivity() {
                         onPairingToggle = { viewModel.togglePairing() },
                         onRelayUrlChange = { viewModel.setRelayUrl(it) },
                         onHubCoreUrlChange = { viewModel.setHubCoreUrl(it) },
+                        onBiometricEnabledChange = { viewModel.setBiometricEnabled(it) },
                         onApprove = { viewModel.approve(it) },
                         onDeny = { viewModel.deny(it) },
                     )
