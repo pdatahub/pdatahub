@@ -61,6 +61,11 @@ object BiometricHelper {
         val info = BiometricPrompt.PromptInfo.Builder()
             .setTitle(title)
             .setSubtitle(subtitle)
+            // Required when using biometric-only authenticators (BIOMETRIC_WEAK/STRONG
+            // without DEVICE_CREDENTIAL). Without this, PromptInfo.build() throws
+            // IllegalArgumentException("Negative text must be set and non-empty.")
+            // and the app crashes on Approve tap. See BiometricHelper.kt history.
+            .setNegativeButtonText("Cancel")
             .setAllowedAuthenticators(
                 BiometricManager.Authenticators.BIOMETRIC_WEAK or
                     BiometricManager.Authenticators.BIOMETRIC_STRONG
