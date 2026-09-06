@@ -135,12 +135,16 @@ export interface InitializeParams {
 }
 
 /**
- * Result of a `tools/call` invocation.
- *
- * Wraps the tool's actual return so we can attach metadata (latency, etc.)
- * later without breaking the tool contract.
- */
+  * Result of a `tools/call` invocation.
+  *
+  * MCP-compliant content array. Plugin tool methods return arbitrary
+  * data; the SDK wraps it into this format before sending to the Hub
+  * over JSON-RPC. Plugins should NOT construct this type themselves —
+  * they write normal tool methods returning whatever shape they want.
+   */
 export interface ToolCallResult {
-  /** Whatever the tool method returned */
-  data: unknown;
+  /** MCP content array (text/image/etc.). */
+  content: Array<{ type: 'text'; text: string }>;
+  /** Set true when the tool ran but reported a logical error. */
+  isError?: boolean;
 }

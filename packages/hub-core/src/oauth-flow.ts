@@ -102,6 +102,12 @@ export class OAuthFlow {
       redirect_uri: `http://127.0.0.1:${callback_port}/callback`,
       scope: opts.oauth.scopes.join(' '),
       state,
+      // Force Google to issue refresh_token alongside access_token.
+      // prompt=consent ensures refresh_token on every auth (Google otherwise
+      // only returns it on the first consent). access_type=offline is
+      // required by Google for refresh_token issuance.
+      access_type: 'offline',
+      prompt: 'consent',
       ...(codeChallenge ? {
         code_challenge: codeChallenge,
         code_challenge_method: 'S256',

@@ -222,7 +222,9 @@ export abstract class Plugin {
       const result = await fn.apply(this, args);
       await this.onToolResult(name, result);
       this.logger?.info(`Tool ${name} succeeded`);
-      const callResult: ToolCallResult = { data: result };
+      const callResult: ToolCallResult = {
+        content: [{ type: 'text', text: JSON.stringify(result) }],
+      };
       return {
         jsonrpc: '2.0',
         id: req.id ?? null,

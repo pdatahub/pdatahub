@@ -11,7 +11,18 @@
 
 import type Database from 'better-sqlite3';
 import { createCipheriv, createDecipheriv, hkdfSync, randomBytes } from 'node:crypto';
+import { request } from 'undici';
 import { logger } from './logger.js';
+
+interface RefreshResponse {
+  access_token: string;
+  expires_in: number;
+  scope?: string;
+  token_type?: string;
+  // Google sometimes rotates the refresh_token (e.g. when scopes change).
+  // When absent, the previous refresh_token remains valid.
+  refresh_token?: string;
+}
 
 export interface TokenInput {
   plugin: string;
@@ -202,6 +213,88 @@ export class TokenVault {
       SELECT plugin, scope, expires_at FROM token_vault ORDER BY plugin
     `).all() as Array<{ plugin: string; scope: string; expires_at: string | null }>;
     return rows;
+  }
+
+  /**
+   * Exchange a stored refresh_token for a fresh access_token. Updates the
+   * vault with the new access_token (and refresh_token if Google rotated it).
+   *
+   * Caller passes the OAuth client_id + client_secret for this plugin (read
+   * from HUB_CLIENT_<PLUGIN>_ID / _SECRET env or config). The refresh_token
+   * stays inside the vault.
+   *
+   * Throws if the plugin has no refresh_token stored, or if the refresh
+   * endpoint returns a non-2xx status.
+   */
+  async refreshAccessToken(
+    plugin: string,
+    clientId: string,
+    clientSecret: string | undefined,
+    tokenUrl: string,
+  ): Promise<{ expires_at: string; scope: string }> {
+    const existing = this.get(plugin);
+    if (!existing) {
+      throw new Error(`no token stored for plugin ${plugin}`);
+    }
+    if (!existing.refresh_token) {
+      throw new Error(
+        `no refresh_token for plugin ${plugin} — re-authorization required`,
+      );
+    }
+
+    const params = new URLSearchParams({
+      grant_type: 'refresh_token',
+      refresh_token: existing.refresh_token,
+      client_id: clientId,
+      ...(clientSecret ? { client_secret: clientSecret } : {}),
+    });
+
+    const res = await request(tokenUrl, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/x-www-form-urlencoded',
+        accept: 'application/json',
+      },
+      body: params.toString(),
+    });
+
+    if (res.statusCode >= 400) {
+      const text = await res.body.text();
+      throw new Error(`token refresh failed: ${res.statusCode} ${text}`);
+    }
+
+    const json = (await res.body.json()) as RefreshResponse;
+    const expiresAt = new Date(Date.now() + json.expires_in * 1000).toISOString();
+    const scope = json.scope ?? existing.scope;
+
+    // Pass existing.refresh_token when new one is absent so store() preserves it.
+    this.store({
+      plugin,
+      access_token: json.access_token,
+      refresh_token: json.refresh_token ?? existing.refresh_token,
+      expires_at: expiresAt,
+      scope,
+    });
+
+    logger.info('OAuth token refreshed', {
+      plugin,
+      has_new_refresh: !!json.refresh_token,
+      expires_in: json.expires_in,
+    });
+
+    return { expires_at: expiresAt, scope };
+  }
+
+  /**
+   * True if the stored access_token will expire within `withinMs` (default
+   * 5 minutes). Returns false if there's no expiry or no stored token.
+   */
+  isExpiringSoon(plugin: string, withinMs = 5 * 60_000): boolean {
+    const token = this.get(plugin);
+    if (!token?.expires_at) return false;
+    const exp = Date.parse(token.expires_at);
+    if (Number.isNaN(exp)) return false;
+    return exp - Date.now() < withinMs;
   }
 }
 

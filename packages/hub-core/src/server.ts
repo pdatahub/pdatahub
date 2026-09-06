@@ -291,7 +291,28 @@ export class HubServer {
       return;
     }
 
-    // Inject token from vault
+    // Proactive refresh: if access_token expires within 5 minutes, swap it
+    // for a fresh one via refresh_token. Prevents 401 mid-call.
+    if (this.opts.tokens.isExpiringSoon(grant.plugin)) {
+      const clientCreds = this.opts.clientCredentials.get(grant.plugin);
+      const oauthConfig = plugin.getInfo().oauth;
+      if (clientCreds && oauthConfig) {
+        try {
+          await this.opts.tokens.refreshAccessToken(
+            grant.plugin,
+            clientCreds.client_id,
+            clientCreds.client_secret,
+            oauthConfig.token_url,
+          );
+        } catch (err) {
+          logger.warn('proactive token refresh failed, continuing with existing token', {
+            plugin: grant.plugin,
+            error: (err as Error).message,
+          });
+        }
+      }
+    }
+
     const tokens = this.opts.tokens.get(grant.plugin);
 
     // Call plugin

@@ -22,6 +22,7 @@ import { existsSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
+import { createServer, type AddressInfo } from 'node:http';
 
 let db: Database.Database;
 let dbPath: string;
@@ -184,6 +185,183 @@ describe('TokenVault', () => {
     expect(list).toHaveLength(1);
     expect(list[0]?.plugin).toBe('a');
     expect(JSON.stringify(list)).not.toContain('secret');
+  });
+
+  describe('isExpiringSoon', () => {
+    it('returns false when no expiry stored', () => {
+      const vault = new TokenVault(db, masterKey);
+      vault.store({ plugin: 'a', access_token: 't', scope: 's' });
+      expect(vault.isExpiringSoon('a')).toBe(false);
+    });
+
+    it('returns false when expiry is far in the future', () => {
+      const vault = new TokenVault(db, masterKey);
+      const future = new Date(Date.now() + 60 * 60_000).toISOString();
+      vault.store({ plugin: 'a', access_token: 't', scope: 's', expires_at: future });
+      expect(vault.isExpiringSoon('a')).toBe(false);
+    });
+
+    it('returns true when expiry is within window (default 5min)', () => {
+      const vault = new TokenVault(db, masterKey);
+      const soon = new Date(Date.now() + 2 * 60_000).toISOString();
+      vault.store({ plugin: 'a', access_token: 't', scope: 's', expires_at: soon });
+      expect(vault.isExpiringSoon('a')).toBe(true);
+    });
+
+    it('returns true when already expired', () => {
+      const vault = new TokenVault(db, masterKey);
+      const past = new Date(Date.now() - 60_000).toISOString();
+      vault.store({ plugin: 'a', access_token: 't', scope: 's', expires_at: past });
+      expect(vault.isExpiringSoon('a')).toBe(true);
+    });
+
+    it('respects custom withinMs window', () => {
+      const vault = new TokenVault(db, masterKey);
+      const in10min = new Date(Date.now() + 10 * 60_000).toISOString();
+      vault.store({ plugin: 'a', access_token: 't', scope: 's', expires_at: in10min });
+      expect(vault.isExpiringSoon('a', 5 * 60_000)).toBe(false);
+      expect(vault.isExpiringSoon('a', 15 * 60_000)).toBe(true);
+    });
+  });
+
+  describe('refreshAccessToken', () => {
+    function startMockTokenEndpoint(responseBody: object, status = 200): Promise<{
+      url: string;
+      received: { body: URLSearchParams | null };
+      close: () => Promise<void>;
+    }> {
+      return new Promise((resolve) => {
+        let received: { body: URLSearchParams | null } = { body: null };
+        const server = createServer((req, res) => {
+          let body = '';
+          req.on('data', (chunk) => (body += chunk));
+          req.on('end', () => {
+            received.body = new URLSearchParams(body);
+            res.writeHead(status, { 'content-type': 'application/json' });
+            res.end(JSON.stringify(responseBody));
+          });
+        });
+        server.listen(0, '127.0.0.1', () => {
+          const port = (server.address() as AddressInfo).port;
+          resolve({
+            url: `http://127.0.0.1:${port}/token`,
+            received,
+            close: () => new Promise<void>((r) => server.close(() => r())),
+          });
+        });
+      });
+    }
+
+    it('throws when no token stored', async () => {
+      const vault = new TokenVault(db, masterKey);
+      await expect(
+        vault.refreshAccessToken('missing', 'id', 'sec', 'http://x/token'),
+      ).rejects.toThrow(/no token stored/);
+    });
+
+    it('throws when no refresh_token', async () => {
+      const vault = new TokenVault(db, masterKey);
+      vault.store({ plugin: 'a', access_token: 'old', scope: 's' });
+      await expect(
+        vault.refreshAccessToken('a', 'id', 'sec', 'http://x/token'),
+      ).rejects.toThrow(/no refresh_token/);
+    });
+
+    it('exchanges refresh_token for new access_token', async () => {
+      const mock = await startMockTokenEndpoint({
+        access_token: 'new-access-token',
+        expires_in: 3600,
+        token_type: 'Bearer',
+      });
+      try {
+        const vault = new TokenVault(db, masterKey);
+        vault.store({
+          plugin: 'a',
+          access_token: 'old-access',
+          refresh_token: 'old-refresh',
+          scope: 'old-scope',
+        });
+        await vault.refreshAccessToken('a', 'cid', 'csec', mock.url);
+
+        const stored = vault.get('a');
+        expect(stored?.access_token).toBe('new-access-token');
+        expect(stored?.refresh_token).toBe('old-refresh'); // preserved (not rotated)
+        expect(stored?.expires_at).toBeTruthy();
+        // expires_at should be ~1h from now
+        const exp = Date.parse(stored!.expires_at!);
+        expect(Math.abs(exp - (Date.now() + 3600_000))).toBeLessThan(5000);
+
+        // Request was made correctly
+        expect(mock.received.body?.get('grant_type')).toBe('refresh_token');
+        expect(mock.received.body?.get('refresh_token')).toBe('old-refresh');
+        expect(mock.received.body?.get('client_id')).toBe('cid');
+        expect(mock.received.body?.get('client_secret')).toBe('csec');
+      } finally {
+        await mock.close();
+      }
+    });
+
+    it('uses rotated refresh_token when provider returns one', async () => {
+      const mock = await startMockTokenEndpoint({
+        access_token: 'new-access',
+        refresh_token: 'NEW-rotated-refresh',
+        expires_in: 3600,
+      });
+      try {
+        const vault = new TokenVault(db, masterKey);
+        vault.store({
+          plugin: 'a',
+          access_token: 'old',
+          refresh_token: 'old-refresh',
+          scope: 's',
+        });
+        await vault.refreshAccessToken('a', 'cid', 'csec', mock.url);
+        const stored = vault.get('a');
+        expect(stored?.refresh_token).toBe('NEW-rotated-refresh');
+      } finally {
+        await mock.close();
+      }
+    });
+
+    it('throws on non-2xx from provider', async () => {
+      const mock = await startMockTokenEndpoint(
+        { error: 'invalid_grant', error_description: 'expired' },
+        400,
+      );
+      try {
+        const vault = new TokenVault(db, masterKey);
+        vault.store({
+          plugin: 'a',
+          access_token: 'old',
+          refresh_token: 'rt',
+          scope: 's',
+        });
+        await expect(
+          vault.refreshAccessToken('a', 'cid', 'csec', mock.url),
+        ).rejects.toThrow(/token refresh failed: 400/);
+
+        // Original token preserved on failure
+        expect(vault.get('a')?.access_token).toBe('old');
+      } finally {
+        await mock.close();
+      }
+    });
+
+    it('omits client_secret when not provided (public client)', async () => {
+      const mock = await startMockTokenEndpoint({
+        access_token: 'new',
+        expires_in: 3600,
+      });
+      try {
+        const vault = new TokenVault(db, masterKey);
+        vault.store({ plugin: 'a', access_token: 'old', refresh_token: 'rt', scope: 's' });
+        await vault.refreshAccessToken('a', 'cid', undefined, mock.url);
+        expect(mock.received.body?.get('client_secret')).toBeNull();
+        expect(mock.received.body?.get('client_id')).toBe('cid');
+      } finally {
+        await mock.close();
+      }
+    });
   });
 
   it('deletes tokens', () => {
