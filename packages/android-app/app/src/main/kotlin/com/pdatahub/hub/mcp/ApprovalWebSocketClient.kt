@@ -89,7 +89,6 @@ class ApprovalWebSocketClient @Inject constructor(
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var reconnectJob: Job? = null
     private var ws: WebSocket? = null
-    private var pingJob: Job? = null
 
     private val _state = MutableStateFlow(ApprovalStreamState.DISCONNECTED)
     val state: StateFlow<ApprovalStreamState> = _state.asStateFlow()
@@ -118,8 +117,6 @@ class ApprovalWebSocketClient @Inject constructor(
             reconnectJob = null
             ws?.close(1000, "client shutdown")
             ws = null
-            pingJob?.cancel()
-            pingJob = null
             _state.value = ApprovalStreamState.DISCONNECTED
         }
     }
@@ -159,9 +156,7 @@ class ApprovalWebSocketClient @Inject constructor(
             if (opened) {
                 attempt = 0
                 _state.value = ApprovalStreamState.CONNECTED
-                startHeartbeat()
                 closedSignal.await()
-                stopHeartbeat()
             }
             _state.value = ApprovalStreamState.DISCONNECTED
             attempt++
@@ -238,26 +233,6 @@ class ApprovalWebSocketClient @Inject constructor(
         } catch (_: Exception) {
             // malformed payload — ignore
         }
-    }
-
-    private fun startHeartbeat() {
-        pingJob?.cancel()
-        pingJob = scope.launch {
-            while (true) {
-                delay(30_000)
-                val socket = ws ?: continue
-                if (socket.send("{\"type\":\"ping\"}")) {
-                    // ok
-                } else {
-                    break
-                }
-            }
-        }
-    }
-
-    private fun stopHeartbeat() {
-        pingJob?.cancel()
-        pingJob = null
     }
 
     fun shutdown() {
