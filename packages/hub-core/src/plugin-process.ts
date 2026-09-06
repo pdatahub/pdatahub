@@ -18,7 +18,7 @@
 
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { existsSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { resolve } from 'node:path';
 import readline from 'node:readline';
 import type { OAuthConfig, PluginManifest } from '@pdatahub/plugin-sdk';
@@ -73,12 +73,18 @@ export class PluginProcess {
     heartbeatMs: number;
     onExit: (name: string) => void;
   }) {
-    this.entryPath = resolve(opts.entry_path);
+    const resolvedPath = resolve(opts.entry_path);
     this.onExit = opts.onExit;
 
-    if (!existsSync(this.entryPath)) {
-      throw new Error(`Plugin entry path does not exist: ${this.entryPath}`);
+    if (!existsSync(resolvedPath)) {
+      throw new Error(`Plugin entry path does not exist: ${opts.entry_path}`);
     }
+
+    // Resolve symlinks so the plugin's bootstrap (which checks
+    // `import.meta.url === file://${process.argv[1]}`) matches. Node.js
+    // resolves symlinks for `import.meta.url` but `process.argv[1]` keeps
+    // the literal path, so symlinked plugins never start otherwise.
+    this.entryPath = realpathSync(resolvedPath);
 
     logger.info('spawning plugin', { entry: this.entryPath });
     this.child = spawn('node', [this.entryPath], {
