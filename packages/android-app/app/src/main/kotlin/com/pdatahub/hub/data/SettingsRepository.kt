@@ -48,6 +48,11 @@ class SettingsRepository @Inject constructor(
         private const val KEY_HUB_CORE_TOKEN = "hub_core_token"
         private const val KEY_BIOMETRIC_ENABLED = "biometric_enabled"
         const val DEFAULT_RELAY_URL = "wss://relay.pdatahub.app"
-        const val DEFAULT_HUB_CORE_URL = "ws://192.168.1.100:8090"
+        // Default points to laptop hub-core via Tailscale MagicDNS.
+        // WireGuard already encrypts all traffic in the Tailscale mesh,
+        // so plain http:// is safe (no need for TLS inside the tunnel).
+        // Port 8080 matches hub-core's default --port.
+        // User can override in Settings UI (HomeScreen) for non-Tailscale setups.
+        const val DEFAULT_HUB_CORE_URL = "http://vladimirmyshkovski.tail36274d.ts.net:8080"
     }
 }

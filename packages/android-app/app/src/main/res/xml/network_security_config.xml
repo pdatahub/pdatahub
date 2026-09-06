@@ -4,5 +4,9 @@
         <domain includeSubdomains="true">127.0.0.1</domain>
         <domain includeSubdomains="true">localhost</domain>
         <domain includeSubdomains="true">10.0.2.2</domain>
+        <!-- Tailscale MagicDNS hostname (e.g. vladimirmyshkovski.tail36274d.ts.net) -->
+        <domain includeSubdomains="true">ts.net</domain>
+        <!-- Tailscale CGNAT range (100.64.0.0/10) for direct IP fallback -->
+        <domain includeSubdomains="true">100.64.0.0</domain>
     </domain-config>
 </network-security-config>
