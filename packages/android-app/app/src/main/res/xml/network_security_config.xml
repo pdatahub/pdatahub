@@ -1,12 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  Allow cleartext HTTP for development/debug builds.
+
+  In production this should be tightened to HTTPS-only with
+  proper certificate validation. Debug builds need cleartext for:
+    - 127.0.0.1 (adb reverse from laptop to phone over USB)
+    - 192.168.x.x (direct WiFi between phone and laptop on same LAN)
+    - 100.64.0.0/10 (Tailscale CGNAT range, e.g. 100.79.247.91)
+    - *.ts.net (Tailscale MagicDNS, e.g. vladimirmyshkovski.tail36274d.ts.net)
+    - 10.0.2.2 (Android emulator → host loopback)
+-->
 <network-security-config>
-    <domain-config cleartextTrafficPermitted="true">
-        <domain includeSubdomains="true">127.0.0.1</domain>
-        <domain includeSubdomains="true">localhost</domain>
-        <domain includeSubdomains="true">10.0.2.2</domain>
-        <!-- Tailscale MagicDNS hostname (e.g. vladimirmyshkovski.tail36274d.ts.net) -->
-        <domain includeSubdomains="true">ts.net</domain>
-        <!-- Tailscale CGNAT range (100.64.0.0/10) for direct IP fallback -->
-        <domain includeSubdomains="true">100.64.0.0</domain>
-    </domain-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
 </network-security-config>
