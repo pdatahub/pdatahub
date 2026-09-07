@@ -35,6 +35,15 @@ import { ApprovalStream } from './approval-stream.js';
 import { PluginRegistry } from './plugin-process.js';
 import { HubServer, loadClientCredentialsFromEnv } from './server.js';
 import { HubIdentity } from './federation/identity.js';
+import { DelegationStore } from './federation/delegation.js';
+import { NonceStore } from './federation/nonces.js';
+import {
+  cmdAcceptDelegation,
+  cmdDelegate,
+  cmdListGranted,
+  cmdListReceived,
+  cmdRevokeDelegation,
+} from './federation/delegation-cli.js';
 import { logger } from './logger.js';
 import { runMigrations } from './migrations.js';
 import { checkHubApiTokenRequirement } from './startup.js';
@@ -87,6 +96,39 @@ function parseSubcommand(argv: string[]):
   | { kind: 'backup'; vaultDb: string; outFile: string }
   | { kind: 'restore'; inFile: string; vaultDb: string }
   | { kind: 'inspect'; inFile: string }
+  | {
+      kind: 'delegate';
+      peerVerifyKey: string;
+      plugin: string;
+      tool: string;
+      scope: string;
+      expires: string;
+      dbPath?: string;
+      masterKeyHex?: string;
+    }
+  | {
+      kind: 'accept-delegation';
+      blob: string;
+      yes: boolean;
+      dbPath?: string;
+      masterKeyHex?: string;
+    }
+  | {
+      kind: 'delegate-list';
+      dbPath?: string;
+      masterKeyHex?: string;
+    }
+  | {
+      kind: 'delegation-list';
+      dbPath?: string;
+      masterKeyHex?: string;
+    }
+  | {
+      kind: 'delegation-revoke';
+      delegationId: string;
+      dbPath?: string;
+      masterKeyHex?: string;
+    }
   | { kind: 'help' } {
   const first = findFirstPositional(argv);
   if (!first) {
@@ -147,6 +189,92 @@ function parseSubcommand(argv: string[]):
       }
       throw new Error('usage: pdatahub-hub identity <show|regen>');
     }
+    case 'delegate': {
+      // Sub-sub-command: `delegate list` (lists granted). Otherwise
+      // `delegate` with flags creates a new delegation.
+      const delegateIdx = argv.indexOf('delegate');
+      const nextIdx = delegateIdx + 1 < argv.length ? delegateIdx + 1 : -1;
+      const next = nextIdx !== -1 ? argv[nextIdx] : undefined;
+      if (next === 'list') {
+        const dIdx = argv.indexOf('--db-path');
+        const dbPath = dIdx !== -1 && argv[dIdx + 1] ? argv[dIdx + 1] : undefined;
+        const mIdx = argv.indexOf('--master-key');
+        const masterKeyHex =
+          mIdx !== -1 && argv[mIdx + 1] ? argv[mIdx + 1] : undefined;
+        return { kind: 'delegate-list', dbPath, masterKeyHex };
+      }
+      // Required flags.
+      const reqFlag = (name: string): string => {
+        const i = argv.indexOf(name);
+        const v = i !== -1 && argv[i + 1] ? argv[i + 1] : undefined;
+        if (!v) {
+          throw new Error(`missing required flag ${name}`);
+        }
+        return v;
+      };
+      const dIdx = argv.indexOf('--db-path');
+      const dbPath = dIdx !== -1 && argv[dIdx + 1] ? argv[dIdx + 1] : undefined;
+      const mIdx = argv.indexOf('--master-key');
+      const masterKeyHex =
+        mIdx !== -1 && argv[mIdx + 1] ? argv[mIdx + 1] : undefined;
+      return {
+        kind: 'delegate',
+        peerVerifyKey: reqFlag('--peer-verify-key'),
+        plugin: reqFlag('--plugin'),
+        tool: reqFlag('--tool'),
+        scope: reqFlag('--scope'),
+        expires: reqFlag('--expires'),
+        dbPath,
+        masterKeyHex,
+      };
+    }
+    case 'accept-delegation': {
+      // First positional after 'accept-delegation' is the blob.
+      const accIdx = argv.indexOf('accept-delegation');
+      const nextIdx = accIdx + 1 < argv.length ? accIdx + 1 : -1;
+      const blob = nextIdx !== -1 ? argv[nextIdx] : undefined;
+      if (!blob || blob.startsWith('--')) {
+        throw new Error(
+          'usage: pdatahub-hub accept-delegation <blob> [--yes]',
+        );
+      }
+      const dIdx = argv.indexOf('--db-path');
+      const dbPath = dIdx !== -1 && argv[dIdx + 1] ? argv[dIdx + 1] : undefined;
+      const mIdx = argv.indexOf('--master-key');
+      const masterKeyHex =
+        mIdx !== -1 && argv[mIdx + 1] ? argv[mIdx + 1] : undefined;
+      const yes = argv.includes('--yes');
+      return { kind: 'accept-delegation', blob, yes, dbPath, masterKeyHex };
+    }
+    case 'delegation': {
+      const dlgIdx = argv.indexOf('delegation');
+      const nextIdx = dlgIdx + 1 < argv.length ? dlgIdx + 1 : -1;
+      const sub = nextIdx !== -1 ? argv[nextIdx] : undefined;
+      if (sub === 'list') {
+        const dIdx = argv.indexOf('--db-path');
+        const dbPath = dIdx !== -1 && argv[dIdx + 1] ? argv[dIdx + 1] : undefined;
+        const mIdx = argv.indexOf('--master-key');
+        const masterKeyHex =
+          mIdx !== -1 && argv[mIdx + 1] ? argv[mIdx + 1] : undefined;
+        return { kind: 'delegation-list', dbPath, masterKeyHex };
+      }
+      if (sub === 'revoke') {
+        const idIdx = dlgIdx + 2 < argv.length ? dlgIdx + 2 : -1;
+        const delegationId = idIdx !== -1 ? argv[idIdx] : undefined;
+        if (!delegationId || delegationId.startsWith('--')) {
+          throw new Error(
+            'usage: pdatahub-hub delegation revoke <delegation_id>',
+          );
+        }
+        const dIdx = argv.indexOf('--db-path');
+        const dbPath = dIdx !== -1 && argv[dIdx + 1] ? argv[dIdx + 1] : undefined;
+        const mIdx = argv.indexOf('--master-key');
+        const masterKeyHex =
+          mIdx !== -1 && argv[mIdx + 1] ? argv[mIdx + 1] : undefined;
+        return { kind: 'delegation-revoke', delegationId, dbPath, masterKeyHex };
+      }
+      throw new Error('usage: pdatahub-hub delegation <list|revoke>');
+    }
     case 'backup': {
       if (argv.length < 3) {
         throw new Error(
@@ -175,7 +303,7 @@ function parseSubcommand(argv: string[]):
       return { kind: 'help' };
     default:
       throw new Error(
-        `unknown subcommand: ${first} (try: init, identity, backup, restore, inspect, help)`,
+        `unknown subcommand: ${first} (try: init, identity, delegate, accept-delegation, delegation, backup, restore, inspect, help)`,
       );
   }
 }
@@ -192,10 +320,23 @@ USAGE
                                            identity in DB (Phase 1).
   pdatahub-hub identity show                Print verify_key + magic_dns + fingerprint
   pdatahub-hub identity regen               DESTRUCTIVE: rotate keypair (y/N)
+  pdatahub-hub delegate [flags]             Issue a delegation (Phase 4, A side)
+  pdatahub-hub delegate list                List granted delegations
+  pdatahub-hub accept-delegation <blob>     Import a delegation (Phase 4, B side)
+  pdatahub-hub delegation list              List received delegations
+  pdatahub-hub delegation revoke <id>       Revoke a granted delegation
   pdatahub-hub backup <db> <out>            Encrypt vault DB → backup file
   pdatahub-hub restore <in> <db>            Decrypt backup file → vault DB
   pdatahub-hub inspect <backup>             Show backup metadata (no decrypt)
   pdatahub-hub help                         This message
+
+DELEGATE FLAGS
+  --peer-verify-key <key>   Peer's ed25519 verify_key (from 'identity show')
+  --plugin <name>           Plugin name (e.g. google-calendar)
+  --tool <name>             Tool name (e.g. listEvents)
+  --scope <scope>           Required scope (must match plugin manifest)
+  --expires <duration>      Duration like "24h", "30d", "1w"
+  --yes                     Skip y/N confirmation (accept-delegation only)
 
 HUB STARTUP FLAGS
   --port <num>            HTTP port (default 8080)
@@ -400,6 +541,138 @@ async function handleSubcommand(
     return 0;
   }
 
+  if (cmd.kind === 'delegate') {
+    const { masterKey, dbPath } = resolveIdentityContext(
+      cmd.dbPath,
+      cmd.masterKeyHex,
+      undefined,
+    );
+    // Scope validation (Momus C5) requires a loaded PluginRegistry. The
+    // CLI does not start the hub server, so plugins are not running here;
+    // skipping scope check at the CLI is the documented best-effort path
+    // (Phase 4 design §"Delegation creation"). The HTTP `/v1/federation/
+    // call` handler enforces scope at call time against the live registry.
+    const result = await cmdDelegate({
+      dbPath,
+      masterKey,
+      peerVerifyKey: cmd.peerVerifyKey,
+      plugin: cmd.plugin,
+      tool: cmd.tool,
+      scope: cmd.scope,
+      expiresIn: cmd.expires,
+    });
+    // eslint-disable-next-line no-console
+    console.log(`Delegation issued: ${result.delegation_id}`);
+    // eslint-disable-next-line no-console
+    console.log(`Plugin: ${cmd.plugin} / ${cmd.tool}   Scope: ${cmd.scope}`);
+    // eslint-disable-next-line no-console
+    console.log(`Expires: ${cmd.expires}`);
+    // eslint-disable-next-line no-console
+    console.log('');
+    // eslint-disable-next-line no-console
+    console.log(`Blob (base64url, share this with the peer):`);
+    // eslint-disable-next-line no-console
+    console.log(result.blob);
+    if (result.qrPngBase64) {
+      // eslint-disable-next-line no-console
+      console.log('');
+      // eslint-disable-next-line no-console
+      console.log(`QR (base64 PNG, ${result.qrPngBase64.length} chars):`);
+      // eslint-disable-next-line no-console
+      console.log(result.qrPngBase64);
+    } else {
+      // eslint-disable-next-line no-console
+      console.log('');
+      // eslint-disable-next-line no-console
+      console.log(`(QR generation skipped — blob is the authoritative transport)`);
+    }
+    return 0;
+  }
+
+  if (cmd.kind === 'delegate-list') {
+    const { masterKey, dbPath } = resolveIdentityContext(
+      cmd.dbPath,
+      cmd.masterKeyHex,
+      undefined,
+    );
+    const rows = await cmdListGranted(dbPath, masterKey);
+    // eslint-disable-next-line no-console
+    console.log(
+      `${'ID'.padEnd(38)} ${'Plugin'.padEnd(22)} ${'Tool'.padEnd(16)} ${'Scope'.padEnd(18)} ${'Expires'.padEnd(22)} ${'Revoked'}`,
+    );
+    for (const r of rows) {
+      // eslint-disable-next-line no-console
+      console.log(
+        `${r.delegation_id.padEnd(38)} ${r.plugin.padEnd(22)} ${r.tool.padEnd(16)} ${r.scope.padEnd(18)} ${r.expires_at.padEnd(22)} ${r.revoked === 1 ? 'yes' : 'no'}`,
+      );
+    }
+    // eslint-disable-next-line no-console
+    console.log(`\n${rows.length} delegation(s).`);
+    return 0;
+  }
+
+  if (cmd.kind === 'accept-delegation') {
+    const { masterKey, dbPath } = resolveIdentityContext(
+      cmd.dbPath,
+      cmd.masterKeyHex,
+      undefined,
+    );
+    const result = await cmdAcceptDelegation({
+      dbPath,
+      masterKey,
+      blob: cmd.blob,
+      yes: cmd.yes,
+    });
+    // eslint-disable-next-line no-console
+    console.log(`\nImported delegation: ${result.delegation_id}`);
+    // eslint-disable-next-line no-console
+    console.log(`Peer:    ${result.peer_hub_name}`);
+    // eslint-disable-next-line no-console
+    console.log(`Hub URL: ${result.peer_hub_url}`);
+    // eslint-disable-next-line no-console
+    console.log(`\nUse "pdatahub-hub delegation list" to view received delegations.`);
+    return 0;
+  }
+
+  if (cmd.kind === 'delegation-list') {
+    const { masterKey, dbPath } = resolveIdentityContext(
+      cmd.dbPath,
+      cmd.masterKeyHex,
+      undefined,
+    );
+    const rows = await cmdListReceived(dbPath, masterKey);
+    // eslint-disable-next-line no-console
+    console.log(
+      `${'ID'.padEnd(38)} ${'Peer'.padEnd(16)} ${'Plugin'.padEnd(22)} ${'Tool'.padEnd(16)} ${'Scope'.padEnd(18)} ${'Expires'.padEnd(22)} ${'Revoked'}`,
+    );
+    for (const r of rows) {
+      // eslint-disable-next-line no-console
+      console.log(
+        `${r.delegation_id.padEnd(38)} ${r.peer_hub_name.padEnd(16)} ${r.plugin.padEnd(22)} ${r.tool.padEnd(16)} ${r.scope.padEnd(18)} ${r.expires_at.padEnd(22)} ${r.revoked === 1 ? 'yes' : 'no'}`,
+      );
+    }
+    // eslint-disable-next-line no-console
+    console.log(`\n${rows.length} delegation(s).`);
+    return 0;
+  }
+
+  if (cmd.kind === 'delegation-revoke') {
+    const { masterKey, dbPath } = resolveIdentityContext(
+      cmd.dbPath,
+      cmd.masterKeyHex,
+      undefined,
+    );
+    const ok = await cmdRevokeDelegation(dbPath, masterKey, cmd.delegationId);
+    if (ok) {
+      // eslint-disable-next-line no-console
+      console.log(`Revoked: ${cmd.delegationId}`);
+      return 0;
+    }
+    // eslint-disable-next-line no-console
+    console.error(`No delegation found with id: ${cmd.delegationId}`);
+    return 1;
+  }
+
   return 0;
 }
 
@@ -565,6 +838,12 @@ async function main(): Promise<void> {
   const audit = new AuditLog(db);
   const tokens = new TokenVault(db, config.masterKey);
 
+  // Phase 3 + 4 — wire federation stores (delegations + nonces). Without
+  // these, /v1/federation/call returns 503 FEDERATION_NOT_INITIALIZED
+  // even with valid config (Phase 3 deviation #4 fix).
+  const delegations = new DelegationStore(db);
+  const nonces = new NonceStore(db);
+
   // Initialize OAuth + approval stream
   const oauth = new OAuthFlow(tokens, config.oauthCallbackPort);
   const approval = new ApprovalStream({ timeoutMs: 60_000 });
@@ -589,6 +868,8 @@ async function main(): Promise<void> {
     oauth,
     approval,
     clientCredentials,
+    delegations,
+    nonces,
   });
   await server.start();
 

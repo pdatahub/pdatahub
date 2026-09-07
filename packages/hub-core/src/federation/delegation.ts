@@ -317,8 +317,14 @@ export interface DelegationReceivedRow {
  * Inputs are minimal because the issuance flow (Phase 4) constructs the blob
  * externally — `signature` is the precomputed blob signature (NOT the result
  * of `signDelegation` here; this method is purely persistence).
+ *
+ * `delegation_id` is optional: when omitted, the store generates a fresh
+ * UUID. Phase 4's `cmdDelegate` pre-generates the ID so the row's PK matches
+ * the `delegation_id` field embedded in the signed blob; test code that
+ * doesn't care about PK stability can let the store pick.
  */
 export interface CreateGrantedInput {
+  delegation_id?: string;
   peer_verify_key: string;
   peer_hub_name?: string | null;
   plugin: string;
@@ -353,7 +359,7 @@ export class DelegationStore {
   constructor(private readonly db: Database.Database) {}
 
   createGranted(input: CreateGrantedInput): string {
-    const delegation_id = randomUUID();
+    const delegation_id = input.delegation_id ?? randomUUID();
     const created_at = new Date().toISOString();
     this.db
       .prepare(
