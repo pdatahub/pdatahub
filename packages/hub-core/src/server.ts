@@ -39,6 +39,8 @@ import type {
   PluginProcessInfo,
 } from './types.js';
 import { HubIdentity } from './federation/identity.js';
+import { DelegationStore, isExpired, isRevoked } from './federation/delegation.js';
+import { NonceStore } from './federation/nonces.js';
 import { logger } from './logger.js';
 
 /**
@@ -70,6 +72,12 @@ export const routeAuth: RouteAuth[] = [
   { method: 'GET', path: '/v1/identity', auth: 'none' },
   { method: 'GET', path: '/v1/tools', auth: 'bearer' },
   { method: 'POST', path: '/v1/tools/:name/call', auth: 'bearer' },
+  // Phase 3 — inbound federated calls from peer hubs. Signed with Ed25519;
+  // X-Federation-Pubkey + X-Federation-Signature validated in
+  // handleFederationCall (NOT Bearer). The dispatch in `checkAuth` lets
+  // `ed25519` routes through; the actual signature check happens in the
+  // handler where we have access to the raw body.
+  { method: 'POST', path: '/v1/federation/call', auth: 'ed25519' },
 ];
 
 /**
@@ -110,6 +118,10 @@ export interface HubServerOptions {
   approval: ApprovalStream;
   /** Map plugin name → client_id/secret (from env or config). */
   clientCredentials: Map<string, PluginClientConfig>;
+  /** Phase 3 — delegations + replay dedup. Optional for backwards compat
+   *  with tests that don't exercise federation. */
+  delegations?: DelegationStore;
+  nonces?: NonceStore;
 }
 
 export class HubServer {
@@ -117,6 +129,18 @@ export class HubServer {
   private server: Server | null = null;
   /** Default user_id for single-user self-hosted MVP. */
   private readonly defaultUserId = 'local-user';
+
+  /**
+   * Phase 3 (Momus I5) — per-(peer_verify_key, agent_id) rate limit.
+   * Tracks recent federated approval requests so a malicious B with N
+   * delegations cannot spam A's phone by distributing across delegation
+   * IDs. Trim window: 60s, threshold: 10 pending requests.
+   *
+   * In-memory only — no DB round-trip in the hot path. Per-process, so a
+   * restart resets the window. Acceptable: a 1-second restart gap at the
+   * 10/min ceiling is not a meaningful DoS reduction.
+   */
+  private readonly federatedRateLimits = new Map<string, number[]>();
 
   constructor(opts: HubServerOptions) {
     this.opts = opts;
@@ -297,6 +321,14 @@ export class HubServer {
       // forge A's signatures.
       if (req.method === 'GET' && url.pathname === '/v1/identity') {
         await this.handleGetIdentity(res);
+        return;
+      }
+
+      // /v1/federation/call — Phase 3. Inbound from peer hubs, signed with
+      // Ed25519. Reads raw body (signature is over the exact bytes sent,
+      // not a re-serialized object).
+      if (req.method === 'POST' && url.pathname === '/v1/federation/call') {
+        await this.handleFederationCall(req, res);
         return;
       }
 
@@ -633,6 +665,428 @@ export class HubServer {
     else this.sendError(res, 404, `no tokens for plugin: ${plugin}`, 'NO_TOKENS');
   }
 
+  /**
+   * Phase 3 — `POST /v1/federation/call` handler. The full inbound
+   * security model from federation-v2-design.md §"Protocol flow" Step 4:
+   *
+   *   1. Read X-Federation-Pubkey + X-Federation-Signature + raw body.
+   *   2. Decode the peer's verify_key from `ed25519:<base64url>`.
+   *   3. Symmetric clock skew check `|now - timestamp| <= 300s`
+   *      (Momus I7). Past or future beyond the window → 401.
+   *   4. Ed25519-verify the signature against the EXACT raw bytes
+   *      (no re-serialization, or signatures would always fail).
+   *   5. NonceStore replay dedup — second call with the same
+   *      request_id within 10 min → 409 REPLAY (Momus I4).
+   *   6. Look up the delegation; check (revoked, expired, peer key,
+   *      tool name) — see design doc failure modes.
+   *   7. Fast 503 NO_APPROVER_CONNECTED when no phone is connected
+   *      (Momus I2) — don't burn the 120s budget.
+   *   8. Per-(peer, agent_id) rate limit: > 10 pending in 60s → 429.
+   *   9. Proactive OAuth refresh (existing pattern from handleCallTool).
+   *  10. Approval flow with 120s budget and federated metadata.
+   *  11. ensureGrant with delegated_by = peer_verify_key (Momus C1).
+   *  12. Invoke plugin; return result.
+   *  13. Cross-hub audit: A side → delegated_by = peer_verify_key.
+   *      (B side is the originating hub, not this one — Phase 5.)
+   */
+  private async handleFederationCall(
+    req: IncomingMessage,
+    res: ServerResponse,
+  ): Promise<void> {
+    const startedAt = Date.now();
+    const delegations = this.opts.delegations;
+    const nonces = this.opts.nonces;
+    if (!delegations || !nonces) {
+      this.sendError(
+        res,
+        503,
+        'federation not initialized on this hub',
+        'FEDERATION_NOT_INITIALIZED',
+      );
+      return;
+    }
+
+    // 1. Read raw body + headers.
+    const pubkeyHeader = this.headerStr(req.headers['x-federation-pubkey']);
+    const sigHeader = this.headerStr(req.headers['x-federation-signature']);
+    if (!pubkeyHeader || !sigHeader) {
+      this.sendError(
+        res,
+        401,
+        'missing X-Federation-Pubkey or X-Federation-Signature',
+        'MISSING_FEDERATION_HEADERS',
+      );
+      return;
+    }
+
+    let raw: string;
+    let json: unknown;
+    try {
+      const body = await this.readRawBody(req);
+      raw = body.raw;
+      json = body.json;
+    } catch (err) {
+      this.sendError(res, 400, (err as Error).message, 'INVALID_BODY');
+      return;
+    }
+
+    // 2. Decode verify_key from base64url.
+    if (!pubkeyHeader.startsWith('ed25519:')) {
+      this.sendError(res, 401, 'invalid pubkey prefix', 'INVALID_PUBKEY');
+      return;
+    }
+    let pubkeyBytes: Uint8Array;
+    try {
+      pubkeyBytes = this.b64urlDecode(pubkeyHeader.slice('ed25519:'.length));
+    } catch (err) {
+      this.sendError(res, 401, `pubkey decode: ${(err as Error).message}`, 'INVALID_PUBKEY');
+      return;
+    }
+    if (pubkeyBytes.length !== 32) {
+      this.sendError(res, 401, `pubkey wrong length (${pubkeyBytes.length})`, 'INVALID_PUBKEY');
+      return;
+    }
+
+    // 3. Symmetric clock skew check.
+    const bodyObj = json as Record<string, unknown> | null;
+    const delegationId = this.stringField(bodyObj, 'delegation_id');
+    const toolName = this.stringField(bodyObj, 'tool');
+    const agentId = this.stringField(bodyObj, 'agent_id');
+    const requestId = this.stringField(bodyObj, 'request_id');
+    const timestamp = this.stringField(bodyObj, 'timestamp');
+    const justification = this.stringField(bodyObj, 'justification') ?? null;
+    const args = this.recordField(bodyObj, 'arguments');
+
+    if (!delegationId || !toolName || !agentId || !requestId || !timestamp) {
+      this.sendError(
+        res,
+        400,
+        'body must include delegation_id, tool, agent_id, request_id, timestamp',
+        'INVALID_BODY',
+      );
+      return;
+    }
+    const ts = Date.parse(timestamp);
+    if (Number.isNaN(ts)) {
+      this.sendError(res, 400, 'invalid timestamp', 'INVALID_TIMESTAMP');
+      return;
+    }
+    const skewMs = Math.abs(Date.now() - ts);
+    if (skewMs > 300_000) {
+      this.sendError(res, 401, `clock skew ${skewMs}ms exceeds 300s`, 'CLOCK_SKEW');
+      return;
+    }
+
+    // 4. Ed25519 verify against raw bytes (no re-serialization).
+    let sigBytes: Uint8Array;
+    try {
+      sigBytes = this.b64urlDecode(sigHeader);
+    } catch (err) {
+      this.sendError(res, 401, `signature decode: ${(err as Error).message}`, 'INVALID_SIGNATURE');
+      return;
+    }
+    if (sigBytes.length !== 64) {
+      this.sendError(res, 401, 'signature wrong length', 'INVALID_SIGNATURE');
+      return;
+    }
+    const bodyBytes = new TextEncoder().encode(raw);
+    if (!HubIdentity.verify(bodyBytes, sigBytes, pubkeyBytes)) {
+      this.sendError(res, 401, 'signature mismatch', 'INVALID_SIGNATURE');
+      return;
+    }
+
+    // 5. Nonce replay dedup — record before delegation lookup so a
+    // replay of an already-rejected request also bounces.
+    if (nonces.isSeenRecently(requestId)) {
+      this.sendError(res, 409, 'request_id already seen within replay window', 'REPLAY');
+      return;
+    }
+
+    // 6. Look up delegation.
+    const delegation = delegations.getGranted(delegationId);
+    if (!delegation) {
+      // No nonce record: a malformed request never consumes the
+      // request_id slot, so an attacker probing for valid IDs is
+      // limited only by signature checks.
+      this.sendError(res, 403, 'unknown delegation', 'DELEGATION_NOT_FOUND');
+      return;
+    }
+    if (isRevoked(delegation)) {
+      this.sendError(res, 403, 'delegation revoked', 'DELEGATION_REVOKED');
+      return;
+    }
+    if (isExpired(delegation.expires_at)) {
+      this.sendError(res, 403, 'delegation expired', 'DELEGATION_EXPIRED');
+      return;
+    }
+    if (delegation.peer_verify_key !== pubkeyHeader) {
+      // Defense in depth: the signature was already verified above,
+      // but the pubkey in the header must also match the delegation's
+      // bound peer. Caught here too in case delegation.peer_verify_key
+      // was tampered with after import.
+      this.sendError(res, 403, 'X-Federation-Pubkey does not match delegation', 'PEER_MISMATCH');
+      return;
+    }
+    if (delegation.tool !== toolName) {
+      this.sendError(res, 403, 'body.tool does not match delegation', 'TOOL_MISMATCH');
+      return;
+    }
+
+    // From here on, the request is valid — record the nonce so a replay
+    // is rejected even if the rest of the flow completes.
+    nonces.record(requestId);
+
+    // 7. Fast 503 when no phone connected (Momus I2).
+    if (this.opts.approval.connectedClients() === 0) {
+      this.opts.audit.append({
+        agent_id: agentId,
+        user_id: this.defaultUserId,
+        tool_name: toolName,
+        plugin: delegation.plugin,
+        scope: delegation.scope,
+        justification,
+        decision: 'denied',
+        grant_id: null,
+        duration_ms: Date.now() - startedAt,
+        error: 'no approver connected',
+        delegated_by: pubkeyHeader,
+        delegated_to: null,
+        decision_federated: null,
+      });
+      this.sendError(res, 503, 'no approver connected', 'NO_APPROVER_CONNECTED');
+      return;
+    }
+
+    // 8. Per-(peer, agent_id) rate limit.
+    const rl = this.checkFederatedRateLimit(pubkeyHeader, agentId);
+    if (rl) {
+      this.sendError(
+        res,
+        429,
+        `rate limit exceeded; retry in ${Math.ceil(rl.retryAfterMs / 1000)}s`,
+        'RATE_LIMIT',
+      );
+      return;
+    }
+
+    // 9. Look up the local plugin (mirrors handleCallTool).
+    const plugin = this.opts.registry.getPlugin(toolName);
+    if (!plugin) {
+      this.sendError(res, 404, `unknown tool: ${toolName}`, 'UNKNOWN_TOOL');
+      return;
+    }
+    const pluginInfo = plugin.getInfo();
+
+    // 10. Proactive OAuth refresh (existing pattern).
+    if (this.opts.tokens.isExpiringSoon(pluginInfo.name)) {
+      const clientCreds = this.opts.clientCredentials.get(pluginInfo.name);
+      const oauthConfig = pluginInfo.oauth;
+      if (clientCreds && oauthConfig) {
+        try {
+          await this.opts.tokens.refreshAccessToken(
+            pluginInfo.name,
+            clientCreds.client_id,
+            clientCreds.client_secret,
+            oauthConfig.token_url,
+          );
+        } catch (err) {
+          logger.warn('proactive token refresh failed, continuing with existing token', {
+            plugin: pluginInfo.name,
+            error: (err as Error).message,
+          });
+        }
+      }
+    }
+    const tokens = this.opts.tokens.get(pluginInfo.name);
+
+    // 11. Approval flow with 120s budget + federated metadata.
+    let decision: import('./approval-stream.js').ApprovalDecision;
+    try {
+      decision = await this.opts.approval.requestApproval({
+        agent_id: agentId,
+        tool_name: toolName,
+        scope: delegation.scope,
+        justification,
+        delegated_by: pubkeyHeader,
+        peer_hub_name: delegation.peer_hub_name,
+        peer_agent_id: agentId,
+        timeoutMsOverride: 120_000,
+      });
+    } catch (err) {
+      const auditEntry = this.opts.audit.append({
+        agent_id: agentId,
+        user_id: this.defaultUserId,
+        tool_name: toolName,
+        plugin: pluginInfo.name,
+        scope: delegation.scope,
+        justification,
+        decision: 'denied',
+        grant_id: null,
+        duration_ms: Date.now() - startedAt,
+        error: (err as Error).message,
+        delegated_by: pubkeyHeader,
+        delegated_to: null,
+        decision_federated: 'federated_timeout',
+      });
+      this.opts.approval.broadcastAudit(auditEntry);
+      this.sendError(res, 403, `approval denied: ${(err as Error).message}`, 'APPROVAL_DENIED');
+      return;
+    }
+
+    if (decision.decision !== 'approved') {
+      const auditEntry = this.opts.audit.append({
+        agent_id: agentId,
+        user_id: this.defaultUserId,
+        tool_name: toolName,
+        plugin: pluginInfo.name,
+        scope: delegation.scope,
+        justification,
+        decision: 'denied',
+        grant_id: null,
+        duration_ms: Date.now() - startedAt,
+        delegated_by: pubkeyHeader,
+        delegated_to: null,
+        decision_federated: 'federated_denied',
+      });
+      this.opts.approval.broadcastAudit(auditEntry);
+      this.sendError(res, 403, 'approval denied', 'APPROVAL_DENIED');
+      return;
+    }
+
+    // 12. ensureGrant with delegated_by (Momus C1).
+    let grant;
+    try {
+      grant = await this.ensureGrant({
+        tool_name: toolName,
+        plugin: pluginInfo.name,
+        agent_id: agentId,
+        user_id: this.defaultUserId,
+        delegated_by: pubkeyHeader,
+      });
+    } catch (err) {
+      const auditEntry = this.opts.audit.append({
+        agent_id: agentId,
+        user_id: this.defaultUserId,
+        tool_name: toolName,
+        plugin: pluginInfo.name,
+        scope: delegation.scope,
+        justification,
+        decision: 'denied',
+        grant_id: null,
+        duration_ms: Date.now() - startedAt,
+        error: (err as Error).message,
+        delegated_by: pubkeyHeader,
+        delegated_to: null,
+        decision_federated: 'federated_denied',
+      });
+      this.opts.approval.broadcastAudit(auditEntry);
+      this.sendError(res, 403, `approval denied: ${(err as Error).message}`, 'APPROVAL_DENIED');
+      return;
+    }
+
+    // 13. Invoke plugin with A's decrypted token.
+    try {
+      const result = await plugin.callTool(toolName, args ?? {}, {
+        agent_id: agentId,
+        request_id: requestId,
+        ...(tokens?.access_token ? { token: tokens.access_token } : {}),
+      });
+      const auditEntry = this.opts.audit.append({
+        agent_id: agentId,
+        user_id: this.defaultUserId,
+        tool_name: toolName,
+        plugin: grant.plugin,
+        scope: grant.scope,
+        justification,
+        decision: 'approved',
+        grant_id: grant.grant_id,
+        duration_ms: Date.now() - startedAt,
+        delegated_by: pubkeyHeader,
+        delegated_to: null,
+        decision_federated: null,
+      });
+      this.opts.approval.broadcastAudit(auditEntry);
+      const response: CallToolResponse = {
+        content: result.content,
+        ...(result.isError !== undefined ? { isError: result.isError } : {}),
+      };
+      this.sendJson(res, 200, response);
+    } catch (err) {
+      const auditEntry = this.opts.audit.append({
+        agent_id: agentId,
+        user_id: this.defaultUserId,
+        tool_name: toolName,
+        plugin: grant.plugin,
+        scope: grant.scope,
+        justification,
+        decision: 'error',
+        grant_id: grant.grant_id,
+        duration_ms: Date.now() - startedAt,
+        error: (err as Error).message,
+        delegated_by: pubkeyHeader,
+        delegated_to: null,
+        decision_federated: null,
+      });
+      this.opts.approval.broadcastAudit(auditEntry);
+      this.sendError(
+        res,
+        500,
+        `plugin call failed: ${(err as Error).message}`,
+        'PLUGIN_ERROR',
+      );
+    }
+  }
+
+  /**
+   * Decode an HTTP header value (which is `string | string[] | undefined`)
+   * to a string. Concatenates array values with `, ` per RFC 7230. Phase 3
+   * federation headers are always single-valued, so this only matters for
+   * defense.
+   */
+  private headerStr(value: string | string[] | undefined): string | undefined {
+    if (value === undefined) return undefined;
+    if (Array.isArray(value)) return value.join(', ');
+    return value;
+  }
+
+  /**
+   * Strict base64url decode. Throws on invalid characters or padding
+   * mismatch (RFC 4648 §5).
+   */
+  private b64urlDecode(input: string): Uint8Array {
+    if (!/^[A-Za-z0-9_-]+$/.test(input)) {
+      throw new Error('invalid base64url character');
+    }
+    const padded =
+      input.length % 4 === 0
+        ? input
+        : input + '='.repeat(4 - (input.length % 4));
+    return new Uint8Array(Buffer.from(padded, 'base64'));
+  }
+
+  /**
+   * Narrow a possibly-undefined field to a string, returning undefined
+   * if the value is missing or not a string. Used for parsing the
+   * JSON body of `/v1/federation/call` defensively.
+   */
+  private stringField(obj: Record<string, unknown> | null, key: string): string | undefined {
+    if (!obj) return undefined;
+    const v = obj[key];
+    return typeof v === 'string' ? v : undefined;
+  }
+
+  private recordField(
+    obj: Record<string, unknown> | null,
+    key: string,
+  ): Record<string, unknown> | undefined {
+    if (!obj) return undefined;
+    const v = obj[key];
+    if (v === undefined) return undefined;
+    return typeof v === 'object' && v !== null && !Array.isArray(v)
+      ? (v as Record<string, unknown>)
+      : undefined;
+  }
+
   /* ─── Helpers ─────────────────────────────────────────────────────────── */
 
   private readBody<T>(req: IncomingMessage): Promise<T> {
@@ -649,6 +1103,53 @@ export class HubServer {
       });
       req.on('error', reject);
     });
+  }
+
+  /**
+   * Read the raw request body as a string AND a parsed object. The
+   * Ed25519 signature is verified over the exact bytes B sent, so the
+   * handler cannot use the typed `readBody<T>` helper (which re-serializes
+   * through `JSON.parse`, breaking the signature).
+   */
+  private readRawBody(req: IncomingMessage): Promise<{ raw: string; json: unknown }> {
+    return new Promise((resolve, reject) => {
+      let data = '';
+      req.on('data', (chunk) => (data += chunk));
+      req.on('end', () => {
+        if (!data) return resolve({ raw: '', json: {} });
+        try {
+          resolve({ raw: data, json: JSON.parse(data) as unknown });
+        } catch (err) {
+          reject(new Error(`invalid JSON: ${(err as Error).message}`));
+        }
+      });
+      req.on('error', reject);
+    });
+  }
+
+  /**
+   * Increment-and-check the per-(peer_verify_key, agent_id) rate limit.
+   * Returns `null` if the call is allowed (after inserting the current
+   * timestamp), or a `{ retryAfterMs }` value if it exceeds the 10/min
+   * ceiling (Momus I5).
+   *
+   * Map value is the array of recent timestamps (ms). Entries older than
+   * the 60s window are trimmed on every call.
+   */
+  private checkFederatedRateLimit(peerVerifyKey: string, agentId: string): { retryAfterMs: number } | null {
+    const key = `${peerVerifyKey}:${agentId}`;
+    const now = Date.now();
+    const cutoff = now - 60_000;
+    const existing = this.federatedRateLimits.get(key) ?? [];
+    const fresh = existing.filter((t) => t > cutoff);
+    if (fresh.length >= 10) {
+      const oldest = fresh[0] ?? now;
+      this.federatedRateLimits.set(key, fresh);
+      return { retryAfterMs: oldest + 60_000 - now };
+    }
+    fresh.push(now);
+    this.federatedRateLimits.set(key, fresh);
+    return null;
   }
 
   private sendJson(res: ServerResponse, status: number, body: unknown): void {

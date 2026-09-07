@@ -230,6 +230,25 @@ export type ApprovalStreamMessage =
       scope: string;
       justification: string | null;
       created_at: string;
+      /**
+       * Phase 3 (Federation v2) — verify_key of the peer hub that
+       * initiated this call. Present ONLY for federated calls (i.e.
+       * when A's hub received `/v1/federation/call` from B). Local
+       * calls leave this undefined.
+       */
+      delegated_by?: string;
+      /**
+       * Phase 3 — display name of the peer hub (e.g. "userB"). UI uses
+       * this to show "userB's agent X requests Y". Undefined for local.
+       */
+      peer_hub_name?: string;
+      /**
+       * Phase 3 — the agent_id from B's side of the call. When a
+       * federated call arrives, `agent_id` above holds the LOCAL-side
+       * identifier (the data owner's identity on A's hub) — this field
+       * preserves B's original `agent_id` for the audit log.
+       */
+      peer_agent_id?: string;
     }
   | {
       type: 'approval_decided';

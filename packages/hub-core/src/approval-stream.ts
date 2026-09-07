@@ -56,28 +56,48 @@ export class ApprovalStream {
   /**
    * Request approval from user. Resolves when Android UI responds (or timeout).
    * Throws on timeout — caller should handle as denial.
+   *
+   * Phase 3 (Federation v2) — accepts optional `delegated_by`,
+   * `peer_hub_name`, and `peer_agent_id`. When present, these are
+   * included in the broadcast so the Android UI can show "userB's
+   * agent X requests Y" instead of the generic local-agent dialog.
+   * Per-call timeout override (`timeoutMsOverride`) lets the caller
+   * give federated requests a 120s budget while keeping the local
+   * 60s default (Momus I1).
    */
   requestApproval(opts: {
     agent_id: string;
     tool_name: string;
     scope: string;
     justification: string | null;
+    /** Phase 3 — peer hub's verify_key for federated calls. */
+    delegated_by?: string | null;
+    /** Phase 3 — peer hub's display name (e.g. "userB"). */
+    peer_hub_name?: string | null;
+    /** Phase 3 — agent_id from B's side (B's original request). */
+    peer_agent_id?: string | null;
+    /** Phase 3 — override this instance's timeoutMs for this call only. */
+    timeoutMsOverride?: number | null;
   }): Promise<ApprovalDecision> {
     const request_id = randomUUID();
     const created_at = new Date().toISOString();
+    const effectiveTimeout = opts.timeoutMsOverride ?? this.timeoutMs;
 
     return new Promise<ApprovalDecision>((resolve, reject) => {
       const timer = setTimeout(() => {
         if (this.pending.has(request_id)) {
           this.pending.delete(request_id);
           logger.warn('approval request timed out', { request_id });
-          reject(new Error(`approval timeout after ${this.timeoutMs}ms`));
+          reject(new Error(`approval timeout after ${effectiveTimeout}ms`));
         }
-      }, this.timeoutMs);
+      }, effectiveTimeout);
 
       const approval: PendingApproval = {
         request_id,
-        ...opts,
+        agent_id: opts.agent_id,
+        tool_name: opts.tool_name,
+        scope: opts.scope,
+        justification: opts.justification,
         created_at,
         resolve,
         reject,
@@ -93,6 +113,9 @@ export class ApprovalStream {
         scope: opts.scope,
         justification: opts.justification,
         created_at,
+        ...(opts.delegated_by ? { delegated_by: opts.delegated_by } : {}),
+        ...(opts.peer_hub_name ? { peer_hub_name: opts.peer_hub_name } : {}),
+        ...(opts.peer_agent_id ? { peer_agent_id: opts.peer_agent_id } : {}),
       };
       this.broadcast(message);
       logger.info('approval request sent', {
@@ -100,6 +123,7 @@ export class ApprovalStream {
         tool: opts.tool_name,
         agent: opts.agent_id,
         connected_clients: this.clients.size,
+        delegated_by: opts.delegated_by ?? null,
       });
     });
   }
@@ -124,6 +148,16 @@ export class ApprovalStream {
       grant_id,
     };
     this.broadcast(message);
+  }
+
+  /**
+   * Number of currently-connected WebSocket clients (phones). Phase 3
+   * fast-path: `/v1/federation/call` checks this BEFORE waiting on the
+   * approval flow so an offline phone returns 503 immediately instead
+   * of burning the 120s budget (Momus I2).
+   */
+  connectedClients(): number {
+    return this.clients.size;
   }
 
   /**

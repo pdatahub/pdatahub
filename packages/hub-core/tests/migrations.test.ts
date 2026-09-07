@@ -1,15 +1,16 @@
 /**
- * Tests for the migration framework (Phase 0.5 foundation + Phase 1 + Phase 2a).
+ * Tests for the migration framework (Phase 0.5 foundation + Phase 1 +
+ * Phase 2a + Phase 2b + Phase 3).
  *
  * Covers:
  *   - Fresh DB: runMigrations creates audit_log / grants / token_vault /
- *     federation_keys / delegations / peer_delegations tables and sets
- *     user_version to 3.
+ *     federation_keys / delegations / peer_delegations / federation_nonces
+ *     tables and sets user_version to 5.
  *   - Idempotency: running twice on the same DB is a no-op (no error,
  *     version unchanged, no duplicate tables).
  *   - PRAGMA reading: readUserVersion handles both `{user_version: N}`
  *     (typical better-sqlite3 return) and bare numbers.
- *   - Per-phase upgrade paths (v1 → v3, v2 → v3).
+ *   - Per-phase upgrade paths (v1 → v5, v2 → v5).
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -48,11 +49,11 @@ function tableNames(): string[] {
 }
 
 describe('runMigrations', () => {
-  it('sets user_version to 4 on a fresh DB (Phase 0.5 + 1 + 2a + 2b applied)', () => {
+  it('sets user_version to 5 on a fresh DB (Phase 0.5 + 1 + 2a + 2b + 3 applied)', () => {
     expect(readUserVersion()).toBe(0);
     const result = runMigrations(db);
-    expect(result).toBe(4);
-    expect(readUserVersion()).toBe(4);
+    expect(result).toBe(5);
+    expect(readUserVersion()).toBe(5);
   });
 
   it('creates audit_log, grants, token_vault tables on a fresh DB', () => {
@@ -86,7 +87,7 @@ describe('runMigrations', () => {
   it('is idempotent — second run does not throw or change version', () => {
     runMigrations(db);
     expect(() => runMigrations(db)).not.toThrow();
-    expect(readUserVersion()).toBe(4);
+    expect(readUserVersion()).toBe(5);
   });
 
   it('idempotent run does not duplicate tables', () => {
@@ -128,15 +129,15 @@ describe('runMigrations', () => {
       .prepare("SELECT id FROM audit_log WHERE id = 'pre-existing'")
       .get();
     expect(row).toBeDefined();
-    expect(readUserVersion()).toBe(4);
+    expect(readUserVersion()).toBe(5);
   });
 });
 
 describe('runMigrations — Phase 1 (federation identity)', () => {
-  it('sets user_version to 4 on a fresh DB (after v2)', () => {
+  it('sets user_version to 5 on a fresh DB (after v2)', () => {
     const result = runMigrations(db);
-    expect(result).toBe(4);
-    expect(readUserVersion()).toBe(4);
+    expect(result).toBe(5);
+    expect(readUserVersion()).toBe(5);
   });
 
   it('creates federation_keys table with all expected columns', () => {
@@ -173,9 +174,9 @@ describe('runMigrations — Phase 1 (federation identity)', () => {
     ).toThrow(/CHECK/);
   });
 
-  it('runs v1 → v2 → v3 → v4 in order', () => {
+  it('runs v1 → v2 → v3 → v4 → v5 in order', () => {
     runMigrations(db);
-    expect(readUserVersion()).toBe(4);
+    expect(readUserVersion()).toBe(5);
     const names = tableNames();
     expect(names).toContain('audit_log');
     expect(names).toContain('grants');
@@ -185,10 +186,10 @@ describe('runMigrations — Phase 1 (federation identity)', () => {
     expect(names).toContain('peer_delegations');
   });
 
-  it('idempotent — second run is a no-op (version stays 4, no duplicate tables)', () => {
+  it('idempotent — second run is a no-op (version stays 5, no duplicate tables)', () => {
     runMigrations(db);
     expect(() => runMigrations(db)).not.toThrow();
-    expect(readUserVersion()).toBe(4);
+    expect(readUserVersion()).toBe(5);
     const count = db
       .prepare(
         "SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name='federation_keys'",
@@ -197,7 +198,7 @@ describe('runMigrations — Phase 1 (federation identity)', () => {
     expect(count.n).toBe(1);
   });
 
-  it('preserves v1 data when migrating forward to v3', () => {
+  it('preserves v1 data when migrating forward to v5', () => {
     db.exec(`
       CREATE TABLE audit_log (
         id TEXT PRIMARY KEY, timestamp TEXT NOT NULL, agent_id TEXT NOT NULL,
@@ -219,10 +220,10 @@ describe('runMigrations — Phase 1 (federation identity)', () => {
       .prepare("SELECT id FROM audit_log WHERE id = 'pre-existing'")
       .get();
     expect(row).toBeDefined();
-    expect(readUserVersion()).toBe(4);
+    expect(readUserVersion()).toBe(5);
   });
 
-  it('upgrades a v1 DB (user_version=1) to v4', () => {
+  it('upgrades a v1 DB (user_version=1) to v5', () => {
     db.exec(`
       CREATE TABLE audit_log (id TEXT PRIMARY KEY, timestamp TEXT NOT NULL);
       CREATE TABLE grants (grant_id TEXT PRIMARY KEY, tool_name TEXT NOT NULL);
@@ -232,7 +233,7 @@ describe('runMigrations — Phase 1 (federation identity)', () => {
 
     runMigrations(db);
 
-    expect(readUserVersion()).toBe(4);
+    expect(readUserVersion()).toBe(5);
     const names = tableNames();
     expect(names).toContain('federation_keys');
     expect(names).toContain('delegations');
@@ -245,7 +246,7 @@ describe('runMigrations — Phase 1 (federation identity)', () => {
     expect(grantCols.map((c) => c.name)).toEqual(expect.arrayContaining(['delegated_by']));
   });
 
-  it('upgrades a v2 DB (user_version=2) to v4', () => {
+  it('upgrades a v2 DB (user_version=2) to v5', () => {
     // Simulates a hub that initialized federation identity (Phase 1) before
     // Phase 2a + 2b landed — should pick up the new delegation tables +
     // federation-context columns.
@@ -273,7 +274,7 @@ describe('runMigrations — Phase 1 (federation identity)', () => {
 
     runMigrations(db);
 
-    expect(readUserVersion()).toBe(4);
+    expect(readUserVersion()).toBe(5);
     const names = tableNames();
     expect(names).toContain('delegations');
     expect(names).toContain('peer_delegations');
@@ -282,7 +283,7 @@ describe('runMigrations — Phase 1 (federation identity)', () => {
     expect(names).toContain('federation_keys');
   });
 
-  it('upgrades a v2 DB (with federation_keys) to v4', () => {
+  it('upgrades a v2 DB (with federation_keys) to v5', () => {
     db.exec(`
       CREATE TABLE audit_log (
         id TEXT PRIMARY KEY, timestamp TEXT NOT NULL, agent_id TEXT NOT NULL,
@@ -307,7 +308,7 @@ describe('runMigrations — Phase 1 (federation identity)', () => {
 
     runMigrations(db);
 
-    expect(readUserVersion()).toBe(4);
+    expect(readUserVersion()).toBe(5);
     const names = tableNames();
     expect(names).toContain('delegations');
     expect(names).toContain('peer_delegations');

@@ -52,11 +52,14 @@
  * delegated_by = B_verify_key cannot match a local grant (delegated_by =
  * NULL), forcing a fresh approval.
  *
- * Subsequent migrations (reserved):
+ * Subsequent migrations:
  *   - v5 (Phase 3): `federation_nonces` table for `request_id` replay dedup
- *                   (10-min sweep, lazy). See federation-v2-design.md
- *                   §"Protocol flow" Step 4 audit example for the
- *                   cross-hub audit log shape.
+ *                   (10-min lazy sweep). See federation-v2-design.md
+ *                   §"Protocol flow" Step 4 — the `federation_nonces`
+ *                   table stores the `request_id` of every accepted
+ *                   federated call. The hub checks `seen_at > now - 600s`
+ *                   at query time (lazy sweep, no background task). Table
+ *                   size ≈ max-concurrent-active-requests × 1.
  *   - v6+: future federation work (multi-hop delegation, peer_signature
  *         rotation, audit retention policy — see Phase 7b in the design).
  */
@@ -208,6 +211,24 @@ const peerDelegationsReceivedSchema = `
   );
 `;
 
+/**
+ * `federation_nonces` — replay dedup for inbound `/v1/federation/call`
+ * requests (Momus I4). One row per accepted `request_id`. The 10-min
+ * retention window is enforced lazily at QUERY time (the `isSeenRecently`
+ * check filters by `seen_at > now - 600s`) AND at INSERT time (the
+ * `record()` method DELETEs rows older than the window in the same
+ * transaction). No background sweep — keeps Phase 3 simple. A busy hub
+ * at 1000 federated calls/min grows the table by ~10k rows over the
+ * window, which SQLite handles trivially.
+ */
+const federationNoncesSchema = `
+  CREATE TABLE IF NOT EXISTS federation_nonces (
+    request_id TEXT PRIMARY KEY,
+    seen_at    TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_federation_nonces_seen_at ON federation_nonces(seen_at);
+`;
+
 const migrations: Migration[] = [
   {
     version: 1,
@@ -251,6 +272,14 @@ const migrations: Migration[] = [
         ALTER TABLE audit_log ADD COLUMN decision_federated TEXT;
         ALTER TABLE grants ADD COLUMN delegated_by TEXT;
       `);
+    },
+  },
+  {
+    version: 5,
+    up: (db) => {
+      // Phase 3 — replay dedup table for `/v1/federation/call`. See
+      // `federation/nonces.ts` (NonceStore) for read/write semantics.
+      db.exec(federationNoncesSchema);
     },
   },
 ];
