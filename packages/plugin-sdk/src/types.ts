@@ -12,10 +12,19 @@
  * it to prompt the user for consent before invoking the tool.
  *
  * `description` is shown to the AI agent so it knows when to use the tool.
+ *
+ * `inputSchema` is an OPTIONAL JSON Schema describing the tool's input shape.
+ * Used to expose the tool over MCP-style endpoints and required when the
+ * tool participates in Phase 2a Federation v2 delegations — the Hub embeds
+ * the schema in the signed delegation blob so the receiving hub can describe
+ * the tool to its AI without trusting out-of-band metadata. When undefined,
+ * the Hub treats the tool as "no schema declared" and refuses to federate it.
  */
 export interface ToolOptions {
   scope: string;
   description: string;
+  /** JSON Schema (object). Omit only when the tool accepts arbitrary input. */
+  inputSchema?: Record<string, unknown>;
 }
 
 /**
@@ -100,11 +109,16 @@ export interface PluginManifest {
 
 /**
  * A single tool definition in the manifest.
+ *
+ * `inputSchema` is JSON Schema for the tool's input. Optional — `undefined`
+ * means the plugin did not declare a schema (Hub blocks federation for such
+ * tools but still permits local calls).
  */
 export interface ToolDefinition {
   name: string;
   scope: string;
   description: string;
+  inputSchema?: Record<string, unknown>;
 }
 
 /**

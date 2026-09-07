@@ -29,6 +29,7 @@ export function buildManifest(
     name: method,
     scope: options.scope,
     description: options.description,
+    ...(options.inputSchema !== undefined ? { inputSchema: options.inputSchema } : {}),
   }));
 
   // Read name/version/description from instance fields. Plugin subclasses set

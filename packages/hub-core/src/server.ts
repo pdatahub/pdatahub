@@ -38,7 +38,64 @@ import type {
   ListToolsResponse,
   PluginProcessInfo,
 } from './types.js';
+import { HubIdentity } from './federation/identity.js';
 import { logger } from './logger.js';
+
+/**
+ * Per-route authentication strategy.
+ *
+ * `none`    — no auth required (e.g. `/health`, public identity endpoint).
+ * `bearer`  — existing HUB_API_TOKEN Bearer check (default for unlisted routes).
+ * `ed25519` — verify X-Federation-Pubkey + X-Federation-Signature. NOT YET
+ *             IMPLEMENTED in Phase 0.5; Phase 3 will replace the pass-through.
+ *             Listed as a placeholder so the route table is the single source
+ *             of truth for future federation endpoints.
+ */
+export type AuthStrategy = 'none' | 'bearer' | 'ed25519';
+
+export interface RouteAuth {
+  method: string;
+  /** Path pattern, supports `:name` placeholders. */
+  path: string;
+  auth: AuthStrategy;
+}
+
+/**
+ * Routes not listed default to `bearer` (fail-closed). `/approval-stream`
+ * WebSocket connections bypass `handleRequest` entirely (handled by
+ * `ApprovalStream`), so they are not in this table — no auth on WS by design.
+ */
+export const routeAuth: RouteAuth[] = [
+  { method: 'GET', path: '/health', auth: 'none' },
+  { method: 'GET', path: '/v1/identity', auth: 'none' },
+  { method: 'GET', path: '/v1/tools', auth: 'bearer' },
+  { method: 'POST', path: '/v1/tools/:name/call', auth: 'bearer' },
+];
+
+/**
+ * Resolve the auth strategy for a (method, pathname). Returns `'bearer'`
+ * (fail-closed default) when no entry matches. Linear scan — fine for the
+ * ≤ 10-entry table.
+ */
+export function lookupAuthStrategy(
+  method: string,
+  pathname: string,
+  table: RouteAuth[] = routeAuth,
+): AuthStrategy {
+  for (const route of table) {
+    if (route.method !== method) continue;
+    if (pathToRegex(route.path).test(pathname)) return route.auth;
+  }
+  return 'bearer';
+}
+
+/** `:name` placeholders become `([^/]+)`; regex metachars in literals are escaped. */
+function pathToRegex(pattern: string): RegExp {
+  const escaped = pattern
+    .replace(/[.+*?^$()|[\]\\]/g, '\\$&')
+    .replace(/:[A-Za-z_][A-Za-z0-9_]*/g, '([^/]+)');
+  return new RegExp(`^${escaped}$`);
+}
 
 const TOOL_GRANT_TTL_MS = 60 * 60 * 1000; // 1 hour default
 
@@ -96,6 +153,17 @@ export class HubServer {
         }
       });
     });
+  }
+
+  /**
+   * Return the bound address of the HTTP server, or `null` if not yet
+   * started. Useful for tests that bind to port 0 (random free port).
+   */
+  address(): { address: string; family: string; port: number } | null {
+    if (!this.server) return null;
+    const addr = this.server.address();
+    if (!addr || typeof addr === 'string') return null;
+    return addr as { address: string; family: string; port: number };
   }
 
   /**
@@ -223,6 +291,14 @@ export class HubServer {
         this.sendJson(res, 200, { status: 'ok', service: 'pdatahub-hub' });
         return;
       }
+      // /v1/identity — public by design (federation-v2-design.md Momus I10).
+      // The trust anchor for delegations is the verify_key INSIDE the signed
+      // delegation blob, not this endpoint — a hub can lie here but cannot
+      // forge A's signatures.
+      if (req.method === 'GET' && url.pathname === '/v1/identity') {
+        await this.handleGetIdentity(res);
+        return;
+      }
 
       this.sendError(res, 404, `not found: ${req.method} ${url.pathname}`, 'NOT_FOUND');
     } catch (err) {
@@ -234,10 +310,25 @@ export class HubServer {
   private checkAuth(req: IncomingMessage): boolean {
     const expected = process.env.HUB_API_TOKEN;
     if (!expected) {
-      // No token configured = open access (dev mode)
+      // No token configured = open access (dev mode). Preserved as-is from
+      // Phase 0.5: the hard-fail in startup.ts handles the non-loopback case
+      // before we ever get here, so by the time we're listening with no
+      // token, the host must be loopback.
       logger.warn('HUB_API_TOKEN not set, allowing unauthenticated access (dev only)');
       return true;
     }
+
+    // Token is configured — dispatch by route. Default for unlisted routes
+    // is `'bearer'` (fail-closed) via `lookupAuthStrategy`.
+    const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+    const strategy = lookupAuthStrategy(req.method ?? '', url.pathname);
+
+    if (strategy === 'none' || strategy === 'ed25519') {
+      // `ed25519` is a Phase 3 placeholder — currently passes. Phase 3 will
+      // add X-Federation-Pubkey / X-Federation-Signature verification here.
+      return true;
+    }
+
     const auth = req.headers.authorization;
     if (!auth || !auth.startsWith('Bearer ')) return false;
     return auth.slice(7) === expected;
@@ -247,6 +338,30 @@ export class HubServer {
     const tools = this.opts.registry.listAllTools();
     const body: ListToolsResponse = { tools };
     this.sendJson(res, 200, body);
+  }
+
+  private async handleGetIdentity(res: ServerResponse): Promise<void> {
+    if (!HubIdentity.exists(this.opts.db)) {
+      this.sendError(
+        res,
+        503,
+        'Hub identity not initialized. Run `pdatahub-hub init`.',
+        'IDENTITY_NOT_INITIALIZED',
+      );
+      return;
+    }
+    try {
+      const identity = HubIdentity.load(this.opts.db, this.opts.config.masterKey);
+      this.sendJson(res, 200, identity.toIdentityEndpointResponse());
+    } catch (err) {
+      logger.error('failed to load hub identity', { error: (err as Error).message });
+      this.sendError(
+        res,
+        500,
+        `failed to load identity: ${(err as Error).message}`,
+        'IDENTITY_LOAD_FAILED',
+      );
+    }
   }
 
   private async handleCallTool(
@@ -286,6 +401,9 @@ export class HubServer {
         grant_id: null,
         duration_ms: Date.now() - startedAt,
         error: (err as Error).message,
+        delegated_by: null,
+        delegated_to: null,
+        decision_federated: null,
       });
       this.sendError(res, 403, `approval denied: ${(err as Error).message}`, 'APPROVAL_DENIED');
       return;
@@ -332,6 +450,9 @@ export class HubServer {
         decision: 'approved',
         grant_id: grant.grant_id,
         duration_ms: Date.now() - startedAt,
+        delegated_by: null,
+        delegated_to: null,
+        decision_federated: null,
       });
       this.opts.approval.broadcastAudit(auditEntry);
       const response: CallToolResponse = {
@@ -351,6 +472,9 @@ export class HubServer {
         grant_id: grant.grant_id,
         duration_ms: Date.now() - startedAt,
         error: (err as Error).message,
+        delegated_by: null,
+        delegated_to: null,
+        decision_federated: null,
       });
       this.opts.approval.broadcastAudit(auditEntry);
       this.sendError(
@@ -363,24 +487,35 @@ export class HubServer {
   }
 
   /**
-   * Ensure a valid grant exists for this (tool, agent). Requests approval if not.
-   * Returns the grant (creates one if approved).
+   * Ensure a valid grant exists for this (tool, agent, delegated_by).
+   * Requests approval if not. Returns the grant (creates one if approved).
+   *
+   * Phase 2b: the match key now includes `delegated_by` (Momus C1). Without
+   * it, a local grant (delegated_by = null) could be reused to satisfy a
+   * federated call from B (which carries delegated_by = B_verify_key),
+   * bypassing A's approval flow. The match key is enforced at the SQL
+   * layer in `GrantStore.findActive`.
+   *
+   * Phase 2b only routes local calls here — `delegated_by` defaults to
+   * null. Phase 3 (the /v1/federation/call endpoint) routes federated
+   * calls through this same method with `delegated_by = peer_verify_key`.
    */
   private async ensureGrant(opts: {
     tool_name: string;
     plugin: string;
     agent_id: string;
     user_id: string;
+    /** Phase 2b — peer verify_key for federated calls (null for local). */
+    delegated_by?: string | null;
   }): Promise<import('./types.js').Grant> {
-    // Check existing grants (re-use if same agent + scope matches)
-    const existing = this.opts.grants
-      .listActiveForUser(opts.user_id)
-      .find(
-        (g) =>
-          g.tool_name === opts.tool_name &&
-          g.agent_id === opts.agent_id &&
-          g.plugin === opts.plugin,
-      );
+    const delegatedBy = opts.delegated_by ?? null;
+
+    const existing = this.opts.grants.findActive({
+      tool_name: opts.tool_name,
+      plugin: opts.plugin,
+      agent_id: opts.agent_id,
+      delegated_by: delegatedBy,
+    });
     if (existing) return existing;
 
     // Request approval
@@ -405,6 +540,7 @@ export class HubServer {
       agent_id: opts.agent_id,
       user_id: opts.user_id,
       expires_at: new Date(Date.now() + TOOL_GRANT_TTL_MS).toISOString(),
+      delegated_by: delegatedBy,
     });
   }
 

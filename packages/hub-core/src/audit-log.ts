@@ -3,6 +3,27 @@
  *
  * SQLite-backed. No UPDATE or DELETE allowed (immutable by convention).
  * Hub is single source of truth: even if laptop MCP lies, Hub knows what happened.
+ *
+ * Phase 2b (Federation v2) adds three nullable columns to the audit log:
+ *   - `delegated_by` (TEXT) — verify_key of the peer hub that initiated
+ *     the call. Populated on A's hub when A receives a federated call from
+ *     B. NULL for local calls. Lets "show me what B's hub did on my data"
+ *     queries filter by `delegated_by = B_verify_key` instead of scanning
+ *     every row.
+ *   - `delegated_to` (TEXT) — mirror of `delegated_by`. Populated on B's
+ *     hub when B proxies out to A. NULL for local calls and on A's hub.
+ *   - `decision_federated` (TEXT) — distinct outcome for federated calls
+ *     on the originating (B-side) hub. Values: 'federated_ok',
+ *     'federated_denied', 'federated_error'. NULL for local calls and on
+ *     A's hub (A uses the standard `decision` column: 'approved' /
+ *     'denied' / 'error'). The split (Momus C3) keeps the existing
+ *     `decision` column semantically stable: it always means "this hub
+ *     made the approval decision". `decision_federated` is the bridge
+ *     between "approved by A" and "the result came back from A".
+ *
+ * Phase 2b only changes the schema and the input shape; the call paths
+ * still write NULLs for local calls. Phase 3 (federation_nonces + the
+ * /v1/federation/call endpoint) populates the columns for real.
  */
 
 import type Database from 'better-sqlite3';
@@ -20,6 +41,22 @@ export interface AuditAppendInput {
   grant_id: string | null;
   duration_ms: number;
   error?: string;
+  /**
+   * Phase 2b — peer verify_key when this hub received a federated call
+   * (NULL on local calls). See file header for which hub populates what.
+   */
+  delegated_by?: string | null;
+  /**
+   * Phase 2b — peer verify_key when this hub proxied a federated call out
+   * (NULL on local calls and on the receiving hub).
+   */
+  delegated_to?: string | null;
+  /**
+   * Phase 2b — Momus C3 distinct outcome on the originating hub for
+   * federated calls ('federated_ok' | 'federated_denied' | 'federated_error').
+   * NULL on local calls and on the receiving hub.
+   */
+  decision_federated?: string | null;
 }
 
 export interface AuditQueryOptions {
@@ -52,7 +89,10 @@ export class AuditLog {
         decision TEXT NOT NULL,
         grant_id TEXT,
         duration_ms INTEGER NOT NULL,
-        error TEXT
+        error TEXT,
+        delegated_by TEXT,
+        delegated_to TEXT,
+        decision_federated TEXT
       );
       CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_log(timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_audit_agent ON audit_log(agent_id);
@@ -69,12 +109,16 @@ export class AuditLog {
     const entry: AuditEntry = {
       id: randomUUID(),
       timestamp: new Date().toISOString(),
+      delegated_by: input.delegated_by ?? null,
+      delegated_to: input.delegated_to ?? null,
+      decision_federated: input.decision_federated ?? null,
       ...input,
     };
     this.db.prepare(`
       INSERT INTO audit_log (id, timestamp, agent_id, user_id, tool_name, plugin, scope,
-                             justification, decision, grant_id, duration_ms, error)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                             justification, decision, grant_id, duration_ms, error,
+                             delegated_by, delegated_to, decision_federated)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       entry.id,
       entry.timestamp,
@@ -88,6 +132,9 @@ export class AuditLog {
       entry.grant_id,
       entry.duration_ms,
       entry.error ?? null,
+      entry.delegated_by ?? null,
+      entry.delegated_to ?? null,
+      entry.decision_federated ?? null,
     );
     return entry;
   }
@@ -123,7 +170,8 @@ export class AuditLog {
     const limit = opts.limit ?? 100;
     const sql = `
       SELECT id, timestamp, agent_id, user_id, tool_name, plugin, scope,
-             justification, decision, grant_id, duration_ms, error
+             justification, decision, grant_id, duration_ms, error,
+             delegated_by, delegated_to, decision_federated
       FROM audit_log
       ${where.length > 0 ? 'WHERE ' + where.join(' AND ') : ''}
       ORDER BY timestamp DESC
@@ -172,6 +220,9 @@ interface AuditRow {
   grant_id: string | null;
   duration_ms: number;
   error: string | null;
+  delegated_by: string | null;
+  delegated_to: string | null;
+  decision_federated: string | null;
 }
 
 function rowToEntry(row: AuditRow): AuditEntry {
@@ -188,5 +239,8 @@ function rowToEntry(row: AuditRow): AuditEntry {
     grant_id: row.grant_id,
     duration_ms: row.duration_ms,
     ...(row.error ? { error: row.error } : {}),
+    delegated_by: row.delegated_by,
+    delegated_to: row.delegated_to,
+    decision_federated: row.decision_federated,
   };
 }

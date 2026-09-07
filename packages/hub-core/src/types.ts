@@ -11,16 +11,21 @@
  * Hub-core's canonical tool descriptor. Matches @pdatahub/mcp-server's shape.
  *
  * Plugins return @pdatahub/plugin-sdk's `ToolDefinition[]` from their manifest.
- * Hub-core augments each with `plugin` (own name) and `inputSchema` (from
- * build-time manifest or empty for MVP) before exposing via /v1/tools.
+ * Hub-core augments each with `plugin` (own name) and `inputSchema` (from the
+ * manifest, or `null` when the plugin omitted it) before exposing via /v1/tools.
+ *
+ * `inputSchema` is `null` exactly when the plugin did not declare a schema.
+ * Federation v2 (Phase 2a) refuses to delegate a tool whose schema is `null`
+ * because the receiving hub has no signed input description to expose to its
+ * AI. Local calls are unaffected.
  */
 export interface ToolDescriptor {
   /** Abstract tool name (e.g. "calendar.read.events"). */
   name: string;
   /** Human-readable description for AI agents. */
   description: string;
-  /** JSON Schema describing the tool's input shape. */
-  inputSchema: Record<string, unknown>;
+  /** JSON Schema for the tool. `null` ⇒ plugin did not declare one. */
+  inputSchema: Record<string, unknown> | null;
   /** Permission scope (e.g. "calendar:read", "messages:write"). */
   scope: string;
   /** Plugin that implements this tool (e.g. "google-calendar"). */
@@ -82,6 +87,13 @@ export interface Grant {
   expires_at: string;
   /** True after manual revoke or auto-expiry. */
   revoked: boolean;
+  /**
+   * Phase 2b (Federation v2) — verify_key of the peer hub that initiated
+   * the call (`null` for local calls). Participates in the `ensureGrant`
+   * match key (Momus C1) so a local grant cannot satisfy a federated
+   * call (and vice versa).
+   */
+  delegated_by: string | null;
 }
 
 /* ─── Internal: audit log ───────────────────────────────────────────────── */
@@ -119,6 +131,22 @@ export interface AuditEntry {
   duration_ms: number;
   /** Error message if decision === 'error'. */
   error?: string;
+  /**
+   * Phase 2b — peer verify_key when this hub received a federated call
+   * (null on local calls and on the originating hub).
+   */
+  delegated_by: string | null;
+  /**
+   * Phase 2b — peer verify_key when this hub proxied a federated call out
+   * (null on local calls and on the receiving hub).
+   */
+  delegated_to: string | null;
+  /**
+   * Phase 2b — Momus C3 distinct outcome on the originating hub for
+   * federated calls ('federated_ok' | 'federated_denied' |
+   * 'federated_error'). Null on local calls and on the receiving hub.
+   */
+  decision_federated: string | null;
 }
 
 /* ─── Internal: token vault ─────────────────────────────────────────────── */

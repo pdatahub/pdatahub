@@ -17,6 +17,7 @@
  *                               require exact match (e.g. Google Web-app clients).
  */
 
+import { scryptSync } from 'node:crypto';
 import { logger } from './logger.js';
 
 export interface HubConfig {
@@ -81,11 +82,8 @@ function parseArgs(argv: string[]): CliArgs {
 }
 
 function deriveMasterKey(passphrase: string): Buffer {
-  // Simple PBKDF2 derivation. For production, use Argon2 (not in stdlib).
-  // Node.js has scrypt as a better alternative.
-  const crypto = require('node:crypto') as typeof import('node:crypto');
   const salt = Buffer.from('pdatahub-hub-v1', 'utf8');
-  return crypto.scryptSync(passphrase, salt, 32);
+  return scryptSync(passphrase, salt, 32);
 }
 
 export function loadConfig(argv: string[] = process.argv.slice(2)): HubConfig {

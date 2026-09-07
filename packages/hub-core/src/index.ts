@@ -25,6 +25,7 @@
  */
 
 import Database from 'better-sqlite3';
+import { scryptSync } from 'node:crypto';
 import { loadConfig } from './config.js';
 import { GrantStore } from './grant-store.js';
 import { AuditLog } from './audit-log.js';
@@ -33,7 +34,10 @@ import { OAuthFlow } from './oauth-flow.js';
 import { ApprovalStream } from './approval-stream.js';
 import { PluginRegistry } from './plugin-process.js';
 import { HubServer, loadClientCredentialsFromEnv } from './server.js';
+import { HubIdentity } from './federation/identity.js';
 import { logger } from './logger.js';
+import { runMigrations } from './migrations.js';
+import { checkHubApiTokenRequirement } from './startup.js';
 import {
   generateMnemonic,
   mnemonicToMasterKey,
@@ -46,16 +50,46 @@ import {
  * Detect which subcommand (if any) was requested.
  * Subcommands are first positional arg, no leading `--`.
  */
+const VALUE_FLAGS = new Set([
+  '--port',
+  '--host',
+  '--db-path',
+  '--master-key',
+  '--passphrase',
+  '--hub-name',
+  '--words',
+  '--oauth-callback-port',
+  '--plugins-dir',
+  '--config',
+]);
+
+function findFirstPositional(argv: string[]): string | undefined {
+  for (let i = 0; i < argv.length; i++) {
+    if (!argv[i].startsWith('--')) {
+      if (i > 0 && VALUE_FLAGS.has(argv[i - 1])) continue;
+      return argv[i];
+    }
+  }
+  return undefined;
+}
+
 function parseSubcommand(argv: string[]):
   | { kind: 'none' }
-  | { kind: 'init'; words: 12 | 15 | 18 | 21 | 24 }
+  | {
+      kind: 'init';
+      words: 12 | 15 | 18 | 21 | 24;
+      hubName?: string;
+      dbPath?: string;
+      masterKeyHex?: string;
+    }
+  | { kind: 'identity-show'; dbPath?: string; masterKeyHex?: string; passphrase?: string }
+  | { kind: 'identity-regen'; dbPath?: string; masterKeyHex?: string; passphrase?: string; hubName?: string; yes: boolean }
   | { kind: 'backup'; vaultDb: string; outFile: string }
   | { kind: 'restore'; inFile: string; vaultDb: string }
   | { kind: 'inspect'; inFile: string }
   | { kind: 'help' } {
-  // No subcommand → start hub.
-  const first = argv[0];
-  if (!first || first.startsWith('--')) {
+  const first = findFirstPositional(argv);
+  if (!first) {
     return { kind: 'none' };
   }
 
@@ -71,7 +105,47 @@ function parseSubcommand(argv: string[]):
         }
         words = n as 12 | 15 | 18 | 21 | 24;
       }
-      return { kind: 'init', words };
+      const hIdx = argv.indexOf('--hub-name');
+      const hubName = hIdx !== -1 && argv[hIdx + 1] ? argv[hIdx + 1] : undefined;
+      const dIdx = argv.indexOf('--db-path');
+      const dbPath = dIdx !== -1 && argv[dIdx + 1] ? argv[dIdx + 1] : undefined;
+      // --master-key skips fresh mnemonic generation — used when adding
+      // identity to an existing hub that already has a master_key.
+      const mIdx = argv.indexOf('--master-key');
+      const masterKeyHex =
+        mIdx !== -1 && argv[mIdx + 1] ? argv[mIdx + 1] : undefined;
+      return { kind: 'init', words, hubName, dbPath, masterKeyHex };
+    }
+    case 'identity': {
+      const identityIdx = argv.indexOf('identity');
+      const subIdx = identityIdx + 1 < argv.length ? identityIdx + 1 : -1;
+      const sub = subIdx !== -1 ? argv[subIdx] : undefined;
+      if (sub === 'show') {
+        const dIdx = argv.indexOf('--db-path');
+        const dbPath = dIdx !== -1 && argv[dIdx + 1] ? argv[dIdx + 1] : undefined;
+        const mIdx = argv.indexOf('--master-key');
+        const masterKeyHex =
+          mIdx !== -1 && argv[mIdx + 1] ? argv[mIdx + 1] : undefined;
+        const pIdx = argv.indexOf('--passphrase');
+        const passphrase =
+          pIdx !== -1 && argv[pIdx + 1] ? argv[pIdx + 1] : undefined;
+        return { kind: 'identity-show', dbPath, masterKeyHex, passphrase };
+      }
+      if (sub === 'regen') {
+        const dIdx = argv.indexOf('--db-path');
+        const dbPath = dIdx !== -1 && argv[dIdx + 1] ? argv[dIdx + 1] : undefined;
+        const mIdx = argv.indexOf('--master-key');
+        const masterKeyHex =
+          mIdx !== -1 && argv[mIdx + 1] ? argv[mIdx + 1] : undefined;
+        const pIdx = argv.indexOf('--passphrase');
+        const passphrase =
+          pIdx !== -1 && argv[pIdx + 1] ? argv[pIdx + 1] : undefined;
+        const hIdx = argv.indexOf('--hub-name');
+        const hubName = hIdx !== -1 && argv[hIdx + 1] ? argv[hIdx + 1] : undefined;
+        const yes = argv.includes('--yes');
+        return { kind: 'identity-regen', dbPath, masterKeyHex, passphrase, hubName, yes };
+      }
+      throw new Error('usage: pdatahub-hub identity <show|regen>');
     }
     case 'backup': {
       if (argv.length < 3) {
@@ -100,7 +174,9 @@ function parseSubcommand(argv: string[]):
     case '-h':
       return { kind: 'help' };
     default:
-      throw new Error(`unknown subcommand: ${first} (try: init, backup, restore, inspect, help)`);
+      throw new Error(
+        `unknown subcommand: ${first} (try: init, identity, backup, restore, inspect, help)`,
+      );
   }
 }
 
@@ -110,7 +186,12 @@ function printHelp(): void {
 
 USAGE
   pdatahub-hub [hub flags]                  Start the hub server
-  pdatahub-hub init [--words 12]            Generate BIP-39 mnemonic + master key
+  pdatahub-hub init [--words 12] [--hub-name <name>]
+                                           Generate BIP-39 mnemonic + master key.
+                                           With --hub-name, also init federation
+                                           identity in DB (Phase 1).
+  pdatahub-hub identity show                Print verify_key + magic_dns + fingerprint
+  pdatahub-hub identity regen               DESTRUCTIVE: rotate keypair (y/N)
   pdatahub-hub backup <db> <out>            Encrypt vault DB → backup file
   pdatahub-hub restore <in> <db>            Decrypt backup file → vault DB
   pdatahub-hub inspect <backup>             Show backup metadata (no decrypt)
@@ -144,29 +225,124 @@ async function handleSubcommand(
   }
 
   if (cmd.kind === 'init') {
-    const mnemonic = generateMnemonic(cmd.words === 12 ? 128 : cmd.words === 15 ? 160 : cmd.words === 18 ? 192 : cmd.words === 21 ? 224 : 256);
-    const masterKey = mnemonicToMasterKey(mnemonic, '');
+    let masterKey: Buffer;
+    let masterKeyHex: string;
+    if (cmd.masterKeyHex) {
+      if (cmd.masterKeyHex.length !== 64) {
+        throw new Error('--master-key must be 32 bytes hex-encoded (64 chars)');
+      }
+      masterKey = Buffer.from(cmd.masterKeyHex, 'hex');
+      masterKeyHex = cmd.masterKeyHex;
+    } else {
+      const mnemonic = generateMnemonic(
+        cmd.words === 12
+          ? 128
+          : cmd.words === 15
+            ? 160
+            : cmd.words === 18
+              ? 192
+              : cmd.words === 21
+                ? 224
+                : 256,
+      );
+      masterKey = mnemonicToMasterKey(mnemonic, '');
+      masterKeyHex = masterKey.toString('hex');
 
+      // eslint-disable-next-line no-console
+      console.log(`\n=== NEW HUB IDENTITY ===\n`);
+      // eslint-disable-next-line no-console
+      console.log(`Mnemonic (${cmd.words} words):\n`);
+      // eslint-disable-next-line no-console
+      console.log(`  ${mnemonic}\n`);
+      // eslint-disable-next-line no-console
+      console.log(`Master key (hex):\n`);
+      // eslint-disable-next-line no-console
+      console.log(`  ${masterKeyHex}\n`);
+      // eslint-disable-next-line no-console
+      console.log(`\x1b[33mWARNING: Write the mnemonic down on paper.\x1b[0m`);
+      // eslint-disable-next-line no-console
+      console.log(`\x1b[33mAnyone with these 12 words AND your backup passphrase\x1b[0m`);
+      // eslint-disable-next-line no-console
+      console.log(`\x1b[33mcan restore your hub. Store separately.\x1b[0m\n`);
+    }
     // eslint-disable-next-line no-console
-    console.log(`\n=== NEW HUB IDENTITY ===\n`);
-    // eslint-disable-next-line no-console
-    console.log(`Mnemonic (${cmd.words} words):\n`);
-    // eslint-disable-next-line no-console
-    console.log(`  ${mnemonic}\n`);
-    // eslint-disable-next-line no-console
-    console.log(`Master key (hex):\n`);
-    // eslint-disable-next-line no-console
-    console.log(`  ${masterKey.toString('hex')}\n`);
-    // eslint-disable-next-line no-console
-    console.log(`\x1b[33mWARNING: Write the mnemonic down on paper.\x1b[0m`);
-    // eslint-disable-next-line no-console
-    console.log(`\x1b[33mAnyone with these 12 words AND your backup passphrase\x1b[0m`);
-    // eslint-disable-next-line no-console
-    console.log(`\x1b[33mcan restore your hub. Store separately.\x1b[0m\n`);
-    // eslint-disable-next-line no-console
-    console.log(`To start hub:  pdatahub-hub --master-key ${masterKey.toString('hex')}`);
+    console.log(`To start hub:  pdatahub-hub --master-key ${masterKeyHex}`);
     // eslint-disable-next-line no-console
     console.log(`To backup:     pdatahub-hub backup <db> <out>`);
+
+    if (cmd.hubName && cmd.dbPath) {
+      const identity = initFederationIdentity(cmd.dbPath, cmd.hubName, masterKey);
+      // eslint-disable-next-line no-console
+      console.log(`\n=== FEDERATION IDENTITY ===`);
+      // eslint-disable-next-line no-console
+      console.log(`Hub name:      ${identity.hubName}`);
+      // eslint-disable-next-line no-console
+      console.log(`Verify key:    ${identity.publicKeyB64()}`);
+      // eslint-disable-next-line no-console
+      console.log(`Magic DNS:     ${identity.magicDns ?? '(not detected)'}`);
+      // eslint-disable-next-line no-console
+      console.log(`Fingerprint:   ${identity.fingerprintHex()}`);
+      // eslint-disable-next-line no-console
+      console.log(`DB:            ${cmd.dbPath}`);
+    }
+    return 0;
+  }
+
+  if (cmd.kind === 'identity-show') {
+    const { masterKey, dbPath } = resolveIdentityContext(cmd.dbPath, cmd.masterKeyHex, cmd.passphrase);
+    const identity = loadFederationIdentity(dbPath, masterKey);
+    // eslint-disable-next-line no-console
+    console.log(`Hub name:    ${identity.hubName}`);
+    // eslint-disable-next-line no-console
+    console.log(`Verify key:  ${identity.publicKeyB64()}`);
+    // eslint-disable-next-line no-console
+    console.log(`Magic DNS:   ${identity.magicDns ?? 'not detected'}`);
+    // eslint-disable-next-line no-console
+    console.log(`Fingerprint: ${identity.fingerprintHex()}`);
+    return 0;
+  }
+
+  if (cmd.kind === 'identity-regen') {
+    if (!cmd.yes) {
+      // eslint-disable-next-line no-console
+      console.error(
+        '\x1b[33mWARNING: This will rotate your hub identity.\x1b[0m',
+      );
+      // eslint-disable-next-line no-console
+      console.error(
+        '\x1b[33mAll existing delegations will be INVALIDATED.\x1b[0m',
+      );
+      // eslint-disable-next-line no-console
+      console.error('\x1b[33mRe-issue delegations from peer hubs.\x1b[0m');
+      // eslint-disable-next-line no-console
+      console.error('Type "yes" to continue, anything else to abort:');
+      const readline = await import('node:readline');
+      const rl = readline.createInterface({
+        input: process.stdin,
+        output: process.stderr,
+        terminal: process.stdin.isTTY ?? false,
+      });
+      const confirmed = await new Promise<string>((resolve) => {
+        rl.question('> ', (answer) => {
+          rl.close();
+          resolve(answer.trim());
+        });
+      });
+      if (confirmed !== 'yes') {
+        // eslint-disable-next-line no-console
+        console.error('Aborted.');
+        return 1;
+      }
+    }
+    const { masterKey, dbPath } = resolveIdentityContext(cmd.dbPath, cmd.masterKeyHex, cmd.passphrase);
+    const hubName = cmd.hubName ?? loadFederationIdentity(dbPath, masterKey).hubName;
+    const identity = initFederationIdentity(dbPath, hubName, masterKey);
+    // eslint-disable-next-line no-console
+    console.log(`Rotated federation identity for "${identity.hubName}".`);
+    // eslint-disable-next-line no-console
+    console.log(`New verify key:  ${identity.publicKeyB64()}`);
+    // eslint-disable-next-line no-console
+    console.log(`New fingerprint: ${identity.fingerprintHex()}`);
     return 0;
   }
 
@@ -228,6 +404,80 @@ async function handleSubcommand(
 }
 
 /**
+ * Open DB at `dbPath`, run migrations, and ensure federation_keys has a
+ * fresh HubIdentity row. Refuses if already initialized (callers must use
+ * `identity regen` to rotate).
+ */
+function initFederationIdentity(
+  dbPath: string,
+  hubName: string,
+  masterKey: Buffer,
+): HubIdentity {
+  const db = new Database(dbPath);
+  db.pragma('journal_mode = WAL');
+  db.pragma('foreign_keys = ON');
+  try {
+    runMigrations(db);
+    if (HubIdentity.exists(db)) {
+      throw new Error(
+        `federation identity already initialized in ${dbPath}. ` +
+          `Run \`pdatahub-hub identity regen\` to rotate.`,
+      );
+    }
+    const identity = HubIdentity.generate(hubName, masterKey);
+    identity.save(db);
+    return identity;
+  } finally {
+    db.close();
+  }
+}
+
+function resolveIdentityContext(
+  dbPathFlag: string | undefined,
+  masterKeyHexFlag: string | undefined,
+  passphraseFlag: string | undefined,
+): { masterKey: Buffer; dbPath: string } {
+  const dbPath = dbPathFlag ?? process.env.HUB_DB_PATH ?? './pdatahub-hub.db';
+  const masterKeyHex =
+    masterKeyHexFlag ?? process.env.HUB_MASTER_KEY ?? undefined;
+  const passphrase = passphraseFlag ?? process.env.HUB_PASSPHRASE ?? undefined;
+  let masterKey: Buffer;
+  if (masterKeyHex) {
+    if (masterKeyHex.length !== 64) {
+      throw new Error('--master-key must be 32 bytes hex-encoded (64 chars)');
+    }
+    masterKey = Buffer.from(masterKeyHex, 'hex');
+  } else if (passphrase) {
+    // Treat as passphrase — matches config.ts deriveMasterKey (scrypt+salt).
+    const salt = Buffer.from('pdatahub-hub-v1', 'utf8');
+    masterKey = scryptSync(passphrase, salt, 32);
+  } else {
+    throw new Error(
+      'Provide --master-key <hex>, --passphrase <text>, ' +
+        'HUB_MASTER_KEY, or HUB_PASSPHRASE env var.',
+    );
+  }
+  return { masterKey, dbPath };
+}
+
+function loadFederationIdentity(dbPath: string, masterKey: Buffer): HubIdentity {
+  const db = new Database(dbPath);
+  db.pragma('foreign_keys = ON');
+  try {
+    runMigrations(db);
+    if (!HubIdentity.exists(db)) {
+      throw new Error(
+        `federation identity not initialized in ${dbPath}. ` +
+          `Run \`pdatahub-hub init --hub-name <name>\` first.`,
+      );
+    }
+    return HubIdentity.load(db, masterKey);
+  } finally {
+    db.close();
+  }
+}
+
+/**
  * Prompt for a passphrase via stdin. Echo is suppressed (TTY-only).
  * For non-TTY (CI/script), reads first line from stdin directly.
  */
@@ -283,10 +533,32 @@ async function main(): Promise<void> {
     plugins_dir: config.pluginsDir,
   });
 
+  // Phase 0.5 — refuse to start without HUB_API_TOKEN on a non-loopback bind.
+  // Loopback hosts (127.0.0.1, ::1, localhost) preserve dev-mode behavior.
+  checkHubApiTokenRequirement(config.host, process.env.HUB_API_TOKEN);
+
   // Open SQLite (WAL mode for concurrent reads + writes)
   const db = new Database(config.dbPath);
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
+
+  // Phase 0.5 — apply versioned schema migrations (idempotent, no-op on
+  // existing DBs). Constructs the baseline tables. AuditLog / GrantStore /
+  // TokenVault constructors still also run their inline CREATE TABLE IF NOT
+  // EXISTS — both paths are idempotent; Phase 2b will remove the inline DDL.
+  const finalVersion = runMigrations(db);
+  logger.info('schema migrations applied', { user_version: finalVersion });
+
+  // Phase 1 — warn on missing identity. Don't auto-generate: hub_name
+  // requires explicit user input (also prints mnemonic + master_key).
+  if (!HubIdentity.exists(db)) {
+    logger.warn(
+      'federation identity not initialized — `GET /v1/identity` will 503. ' +
+        'Run `pdatahub-hub init --hub-name <name> --db-path ' +
+        config.dbPath +
+        '` to set it up.',
+    );
+  }
 
   // Initialize stores
   const grants = new GrantStore(db);

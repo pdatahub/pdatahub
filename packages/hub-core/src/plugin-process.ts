@@ -146,7 +146,7 @@ export class PluginProcess {
     const tools: ToolDescriptor[] = result.tools.map((t) => ({
       name: t.name,
       description: t.description,
-      inputSchema: {},
+      inputSchema: t.inputSchema ?? null,
       scope: t.scope,
       plugin: result.name,
     }));
