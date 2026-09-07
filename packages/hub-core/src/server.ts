@@ -22,6 +22,7 @@ import { createServer, type IncomingMessage, type ServerResponse, type Server } 
 import { randomBytes } from 'node:crypto';
 import { existsSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { request as undiciRequest } from 'undici';
 import type Database from 'better-sqlite3';
 import type { PluginRegistry } from './plugin-process.js';
 import { PluginProcess as PluginProcessClass } from './plugin-process.js';
@@ -32,14 +33,21 @@ import type { OAuthFlow, PluginClientConfig } from './oauth-flow.js';
 import type { ApprovalStream } from './approval-stream.js';
 import type { HubConfig } from './config.js';
 import type {
+  AuditEntry,
   CallToolRequest,
   CallToolResponse,
   HubErrorResponse,
   ListToolsResponse,
   PluginProcessInfo,
+  ToolDescriptor,
 } from './types.js';
 import { HubIdentity } from './federation/identity.js';
-import { DelegationStore, isExpired, isRevoked } from './federation/delegation.js';
+import {
+  DelegationStore,
+  isExpired,
+  isRevoked,
+  type DelegationReceivedRow,
+} from './federation/delegation.js';
 import { NonceStore } from './federation/nonces.js';
 import { logger } from './logger.js';
 
@@ -72,6 +80,12 @@ export const routeAuth: RouteAuth[] = [
   { method: 'GET', path: '/v1/identity', auth: 'none' },
   { method: 'GET', path: '/v1/tools', auth: 'bearer' },
   { method: 'POST', path: '/v1/tools/:name/call', auth: 'bearer' },
+  // Phase 5 — B-side endpoint where mcp-server invokes a federated tool.
+  // Bearer-authenticated (the mcp-server holds HUB_API_TOKEN). hub-core
+  // looks up the matching `peer_delegations` row, signs the outbound body
+  // with B's identity, and POSTs to A's `/v1/federation/call` (which is
+  // ed25519-authenticated on the receiving side — see below).
+  { method: 'POST', path: '/v1/federation/invoke', auth: 'bearer' },
   // Phase 3 — inbound federated calls from peer hubs. Signed with Ed25519;
   // X-Federation-Pubkey + X-Federation-Signature validated in
   // handleFederationCall (NOT Bearer). The dispatch in `checkAuth` lets
@@ -332,6 +346,15 @@ export class HubServer {
         return;
       }
 
+      // /v1/federation/invoke — Phase 5. mcp-server's B-side entry point.
+      // Bearer-authenticated; hub-core looks up the peer_delegations row,
+      // signs the outbound body with B's identity, and POSTs to A's
+      // /v1/federation/call. A-side ed25519 auth happens on A.
+      if (req.method === 'POST' && url.pathname === '/v1/federation/invoke') {
+        await this.handleFederationInvoke(req, res);
+        return;
+      }
+
       this.sendError(res, 404, `not found: ${req.method} ${url.pathname}`, 'NOT_FOUND');
     } catch (err) {
       logger.error('request handler error', { error: (err as Error).message });
@@ -368,8 +391,69 @@ export class HubServer {
 
   private async handleListTools(res: ServerResponse): Promise<void> {
     const tools = this.opts.registry.listAllTools();
-    const body: ListToolsResponse = { tools };
+    const federated = this.listFederatedToolDescriptors();
+    const body: ListToolsResponse = { tools: [...tools, ...federated] };
     this.sendJson(res, 200, body);
+  }
+
+  /**
+   * Build synthetic `ToolDescriptor` entries for every active
+   * `peer_delegations` row (Phase 5, Momus B7). Active = not revoked AND
+   * `expires_at > now`.
+   *
+   * Tool name format: `federated__<peer_hub_name>__<tool>` (uses `__` so the
+   * name satisfies MCP's `^[a-zA-Z0-9_-]{1,64}$` constraint — colons would
+   * not). mcp-server's `refreshTools` sees `federated: true` and routes the
+   * call to `/v1/federation/invoke` instead of `/v1/tools/:name/call`.
+   *
+   * Tie-break: when multiple `peer_delegations` rows match the same
+   * `(peer_hub_name, tool)` tuple, pick the one with the latest
+   * `expires_at` (Momus Q4). The query in `DelegationStore.findReceivedMatch`
+   * is already `ORDER BY expires_at DESC`; we de-duplicate by name in JS.
+   *
+   * Returns `[]` if `DelegationStore` was not wired (e.g. tests that don't
+   * exercise federation).
+   */
+  private listFederatedToolDescriptors(): ToolDescriptor[] {
+    const delegations = this.opts.delegations;
+    if (!delegations) return [];
+    const now = new Date().toISOString();
+    const rows = delegations
+      .listReceived()
+      .filter((row) => row.revoked === 0 && row.expires_at > now);
+    const byName = new Map<string, DelegationReceivedRow>();
+    for (const row of rows) {
+      const name = `federated__${row.peer_hub_name}__${row.tool}`;
+      const prev = byName.get(name);
+      if (!prev || row.expires_at > prev.expires_at) byName.set(name, row);
+    }
+    const out: ToolDescriptor[] = [];
+    for (const [name, row] of byName) {
+      let inputSchema: Record<string, unknown> | null = null;
+      if (row.input_schema) {
+        try {
+          inputSchema = JSON.parse(row.input_schema) as Record<string, unknown>;
+        } catch (err) {
+          logger.warn('peer_delegation input_schema is not valid JSON', {
+            delegation_id: row.delegation_id,
+            error: (err as Error).message,
+          });
+        }
+      }
+      out.push({
+        name,
+        description: `Federated call to ${row.tool} on ${row.peer_hub_name}'s ${row.plugin} hub (expires ${row.expires_at})`,
+        inputSchema,
+        scope: row.scope,
+        plugin: row.plugin,
+        federated: true,
+        delegation_id: row.delegation_id,
+        peer_hub_name: row.peer_hub_name,
+        peer_hub_url: row.peer_hub_url,
+        expires_at: row.expires_at,
+      });
+    }
+    return out;
   }
 
   private async handleGetIdentity(res: ServerResponse): Promise<void> {
@@ -1035,6 +1119,308 @@ export class HubServer {
         'PLUGIN_ERROR',
       );
     }
+  }
+
+  /**
+   * Phase 5 — `POST /v1/federation/invoke` handler (Momus B6). mcp-server
+   * posts here when the AI calls a synthetic `federated__<hub>__<tool>`.
+   * B's hub:
+   *
+   *   1. Parses `federated__<hub>__<tool>` → `(peer_hub_name, tool)`.
+   *   2. Looks up `peer_delegations` (active rows only — revoked/expired
+   *      omitted at the SQL layer). Tie-breaks by latest `expires_at`
+   *      (Momus Q4).
+   *   3. Builds the federation request body (mirrors the inbound schema
+   *      that `handleFederationCall` expects from B):
+   *         { delegation_id, tool, arguments, agent_id, request_id,
+   *           timestamp, justification? }
+   *   4. Signs the body with B's identity; POSTs to A's
+   *      `/v1/federation/call` with `X-Federation-Pubkey` +
+   *      `X-Federation-Signature`. Ed25519 auth happens on A.
+   *   5. Returns A's response to mcp-server (200 / error).
+   *   6. Cross-hub audit (Momus §"Protocol flow" Step 5): on B's hub we
+   *      write `delegated_to = A_verify_key` + `decision_federated =
+   *      'federated_ok' | 'federated_denied' | 'federated_error'`.
+   *
+   * Body schema (request): `{ tool: string, arguments: object, agent_id:
+   * string, justification?: string }`.
+   *
+   * Body schema (response, when A returns 200): `{ content: [...],
+   * isError?: boolean }` — same as `/v1/tools/:name/call`.
+   *
+   * Failure modes mapped to design doc §"Failure modes":
+   *   - A unreachable          → 502 FEDERATION_UPSTREAM_ERROR
+   *   - A returns 403 (denied) → 403 FEDERATION_DENIED
+   *   - A returns 5xx          → 502 FEDERATION_UPSTREAM_ERROR
+   *   - No matching delegation → 404 DELEGATION_NOT_FOUND
+   *   - Delegation revoked/expired → 403 DELEGATION_REVOKED / DELEGATION_EXPIRED
+   *   - malformed tool name    → 400 INVALID_FEDERATED_NAME
+   */
+  private async handleFederationInvoke(
+    req: IncomingMessage,
+    res: ServerResponse,
+  ): Promise<void> {
+    const startedAt = Date.now();
+    const delegations = this.opts.delegations;
+    if (!delegations) {
+      this.sendError(
+        res,
+        503,
+        'federation not initialized on this hub',
+        'FEDERATION_NOT_INITIALIZED',
+      );
+      return;
+    }
+    if (!HubIdentity.exists(this.opts.db)) {
+      this.sendError(
+        res,
+        503,
+        'Hub identity not initialized. Run `pdatahub-hub init`.',
+        'IDENTITY_NOT_INITIALIZED',
+      );
+      return;
+    }
+
+    let body: Record<string, unknown>;
+    try {
+      body = (await this.readBody<Record<string, unknown>>(req)) ?? {};
+    } catch (err) {
+      this.sendError(res, 400, (err as Error).message, 'INVALID_BODY');
+      return;
+    }
+    const toolName = typeof body['tool'] === 'string' ? (body['tool'] as string) : '';
+    const args = this.recordField(body, 'arguments') ?? {};
+    const agentId =
+      typeof body['agent_id'] === 'string' ? (body['agent_id'] as string) : 'unknown-agent';
+    const justificationRaw = body['justification'];
+    const justification = typeof justificationRaw === 'string' ? justificationRaw : null;
+
+    const parsed = this.parseFederatedToolName(toolName);
+    if (!parsed) {
+      this.sendError(
+        res,
+        400,
+        `tool name must match federated__<hub>__<tool>: ${toolName}`,
+        'INVALID_FEDERATED_NAME',
+      );
+      return;
+    }
+    const matches = delegations.findReceivedMatch(parsed.peerHubName, parsed.tool);
+    if (matches.length === 0) {
+      this.sendError(
+        res,
+        404,
+        `no active delegation for ${parsed.peerHubName}/${parsed.tool}`,
+        'DELEGATION_NOT_FOUND',
+      );
+      return;
+    }
+    const delegation = matches[0]!; // ORDER BY expires_at DESC; latest wins
+    if (isRevoked(delegation)) {
+      this.sendError(
+        res,
+        403,
+        `delegation ${delegation.delegation_id} revoked`,
+        'DELEGATION_REVOKED',
+      );
+      return;
+    }
+    if (isExpired(delegation.expires_at)) {
+      this.sendError(
+        res,
+        403,
+        `delegation ${delegation.delegation_id} expired`,
+        'DELEGATION_EXPIRED',
+      );
+      return;
+    }
+
+    let identity: HubIdentity;
+    try {
+      identity = HubIdentity.load(this.opts.db, this.opts.config.masterKey);
+    } catch (err) {
+      this.sendError(
+        res,
+        500,
+        `failed to load identity: ${(err as Error).message}`,
+        'IDENTITY_LOAD_FAILED',
+      );
+      return;
+    }
+
+    const requestId = randomBytes(8).toString('hex');
+    const timestamp = new Date().toISOString();
+    const outboundBody = {
+      delegation_id: delegation.delegation_id,
+      tool: delegation.tool,
+      arguments: args,
+      agent_id: agentId,
+      request_id: requestId,
+      timestamp,
+      ...(justification ? { justification } : {}),
+    };
+    const raw = JSON.stringify(outboundBody);
+    const sigBytes = identity.sign(new TextEncoder().encode(raw));
+    const sigHeader = Buffer.from(sigBytes)
+      .toString('base64')
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_')
+      .replace(/=+$/g, '');
+
+    const upstreamUrl = `${delegation.peer_hub_url.replace(/\/+$/, '')}/v1/federation/call`;
+    let upstream: Awaited<ReturnType<typeof undiciRequest>>;
+    try {
+      upstream = await undiciRequest(upstreamUrl, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-federation-pubkey': identity.publicKeyB64(),
+          'x-federation-signature': sigHeader,
+        },
+        body: raw,
+        headersTimeout: 130_000, // > A's 120s approval budget + margin
+        bodyTimeout: 130_000,
+      });
+    } catch (err) {
+      const entry = this.writeFederatedAudit({
+        delegations,
+        audit: this.opts.audit,
+        delegation,
+        agentId,
+        justification,
+        decisionFederated: 'federated_error',
+        errorMessage: `upstream unreachable: ${(err as Error).message}`,
+        startedAt,
+      });
+      this.opts.approval.broadcastAudit(entry);
+      this.sendError(
+        res,
+        502,
+        `federation upstream unreachable: ${(err as Error).message}`,
+        'FEDERATION_UPSTREAM_ERROR',
+      );
+      return;
+    }
+
+    const text = await upstream.body.text();
+    let parsedUpstream: Record<string, unknown> | null = null;
+    try {
+      parsedUpstream = JSON.parse(text) as Record<string, unknown>;
+    } catch {
+      // Leave as null — handled below by status code only.
+    }
+    const upstreamStatus = upstream.statusCode;
+
+    if (upstreamStatus >= 200 && upstreamStatus < 300) {
+      const entry = this.writeFederatedAudit({
+        delegations,
+        audit: this.opts.audit,
+        delegation,
+        agentId,
+        justification,
+        decisionFederated: 'federated_ok',
+        errorMessage: null,
+        startedAt,
+      });
+      this.opts.approval.broadcastAudit(entry);
+      const response: CallToolResponse = {
+        content:
+          (parsedUpstream &&
+            Array.isArray(parsedUpstream['content']) &&
+            (parsedUpstream['content'] as Array<{ type: 'text'; text: string }>)) ||
+          [],
+        ...(parsedUpstream && typeof parsedUpstream['isError'] === 'boolean'
+          ? { isError: parsedUpstream['isError'] as boolean }
+          : {}),
+      };
+      this.sendJson(res, 200, response);
+      return;
+    }
+
+    // Upstream returned 4xx/5xx — log cross-hub audit + forward.
+    const code =
+      parsedUpstream && typeof parsedUpstream['code'] === 'string'
+        ? (parsedUpstream['code'] as string)
+        : undefined;
+    const upstreamError =
+      parsedUpstream && typeof parsedUpstream['error'] === 'string'
+        ? (parsedUpstream['error'] as string)
+        : text || `upstream returned ${upstreamStatus}`;
+    const decisionFederated =
+      upstreamStatus === 403
+        ? 'federated_denied'
+        : upstreamStatus >= 500
+          ? 'federated_error'
+          : 'federated_error';
+    const entry = this.writeFederatedAudit({
+      delegations,
+      audit: this.opts.audit,
+      delegation,
+      agentId,
+      justification,
+      decisionFederated,
+      errorMessage: upstreamError,
+      startedAt,
+    });
+    this.opts.approval.broadcastAudit(entry);
+    this.sendError(res, upstreamStatus, upstreamError, code ?? 'FEDERATION_UPSTREAM_ERROR');
+  }
+
+  /**
+   * Parse a tool name of the form `federated__<hub>__<tool>`. Returns
+   * `null` when the name does not match — the caller should reject the
+   * request. The peer_hub_name and tool are returned verbatim (no
+   * further validation), so the delegation lookup will surface unknown
+   * peer/tool combinations as `DELEGATION_NOT_FOUND`.
+   */
+  private parseFederatedToolName(
+    name: string,
+  ): { peerHubName: string; tool: string } | null {
+    if (!name.startsWith('federated__')) return null;
+    const rest = name.slice('federated__'.length);
+    const sep = rest.indexOf('__');
+    if (sep < 0) return null;
+    const peerHubName = rest.slice(0, sep);
+    const tool = rest.slice(sep + 2);
+    if (peerHubName.length === 0 || tool.length === 0) return null;
+    return { peerHubName, tool };
+  }
+
+  /**
+   * Append a cross-hub audit entry on B's hub for a federated call
+   * attempt. Populates `delegated_to = A_verify_key` and the appropriate
+   * `decision_federated` value (Momus §"Protocol flow" Step 5). Used by
+   * `handleFederationInvoke` for both successful and failed upstream
+   * responses. Returns the appended entry so the caller can broadcast it
+   * to live UI subscribers via `ApprovalStream.broadcastAudit`.
+   */
+  private writeFederatedAudit(opts: {
+    delegations: DelegationStore;
+    audit: AuditLog;
+    delegation: DelegationReceivedRow;
+    agentId: string;
+    justification: string | null;
+    decisionFederated: 'federated_ok' | 'federated_denied' | 'federated_error';
+    errorMessage: string | null;
+    startedAt: number;
+  }): AuditEntry {
+    const decision: 'approved' | 'denied' | 'error' =
+      opts.decisionFederated === 'federated_ok' ? 'approved' : 'denied';
+    return opts.audit.append({
+      agent_id: opts.agentId,
+      user_id: this.defaultUserId,
+      tool_name: opts.delegation.tool,
+      plugin: opts.delegation.plugin,
+      scope: opts.delegation.scope,
+      justification: opts.justification,
+      decision,
+      grant_id: null,
+      duration_ms: Date.now() - opts.startedAt,
+      ...(opts.errorMessage ? { error: opts.errorMessage } : {}),
+      delegated_by: null,
+      delegated_to: opts.delegation.peer_verify_key,
+      decision_federated: opts.decisionFederated,
+    });
   }
 
   /**

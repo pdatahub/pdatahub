@@ -18,9 +18,17 @@
  * Federation v2 (Phase 2a) refuses to delegate a tool whose schema is `null`
  * because the receiving hub has no signed input description to expose to its
  * AI. Local calls are unaffected.
+ *
+ * Phase 5 (Federation v2) — synthetic descriptors for federated tools extend
+ * this shape with optional fields. mcp-server uses `federated: true` to
+ * dispatch the call to `/v1/federation/invoke` instead of
+ * `/v1/tools/:name/call`; `delegation_id` + `peer_hub_name` carry the routing
+ * context. `expires_at` is the federated tool's expiry (NOT the same as a
+ * local plugin's lifetime — see `peer_delegations.expires_at`).
  */
 export interface ToolDescriptor {
-  /** Abstract tool name (e.g. "calendar.read.events"). */
+  /** Abstract tool name (e.g. "calendar.read.events" or
+   *  "federated__userA__listEvents" for Phase 5 synthetic entries). */
   name: string;
   /** Human-readable description for AI agents. */
   description: string;
@@ -30,6 +38,16 @@ export interface ToolDescriptor {
   scope: string;
   /** Plugin that implements this tool (e.g. "google-calendar"). */
   plugin: string;
+  /** Phase 5 — `true` for synthetic federated descriptors. Omitted for local. */
+  federated?: boolean;
+  /** Phase 5 — `peer_delegations.delegation_id` (UUID). Synthetic only. */
+  delegation_id?: string;
+  /** Phase 5 — display name of the peer hub (e.g. "userA"). Synthetic only. */
+  peer_hub_name?: string;
+  /** Phase 5 — peer hub URL (e.g. "http://userA.tailXXXX.ts.net:8080"). */
+  peer_hub_url?: string;
+  /** Phase 5 — ISO 8601 delegation expiry. Synthetic only. */
+  expires_at?: string;
 }
 
 export interface ListToolsResponse {

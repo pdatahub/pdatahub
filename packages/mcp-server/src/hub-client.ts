@@ -1,9 +1,12 @@
 /**
  * HTTP client to the pdatahub Hub.
  *
- * Talks JSON over HTTP. Two endpoints:
- *   GET  /v1/tools            → list available tools
- *   POST /v1/tools/:name/call → invoke a tool
+ * Talks JSON over HTTP. Endpoints:
+ *   GET  /v1/tools                  → list available tools
+ *   POST /v1/tools/:name/call       → invoke a LOCAL tool
+ *   POST /v1/federation/invoke      → invoke a FEDERATED tool
+ *                                     (Phase 5, Momus B6 — synthetic
+ *                                     `federated__<hub>__<tool>` names)
  *
  * Auth: Bearer token from config.
  */
@@ -52,6 +55,37 @@ export class HubClient {
     const url = `${this.baseUrl}/v1/tools/${encodeURIComponent(name)}/call`;
     const payload: CallToolRequest = { name, arguments: args };
     logger.debug('POST /v1/tools/:name/call', { url, name });
+    const res = await this.request('POST', url, payload);
+    const body = (await res.body.json()) as CallToolResponse;
+    return {
+      content: body.content ?? [],
+      isError: body.isError ?? false,
+    };
+  }
+
+  /**
+   * Phase 5 — invoke a federated tool (Momus B6). hub-core looks up the
+   * matching `peer_delegations` row, signs the outbound body with B's
+   * identity, and POSTs to A's `/v1/federation/call`.
+   *
+   * `toolName` must be a synthetic federated descriptor name (the format
+   * `federated__<hub>__<tool>`); hub-core rejects any other shape with
+   * `INVALID_FEDERATED_NAME`. mcp-server routes here automatically based
+   * on the prefix — see `PdatahubMcpServer.refreshTools`.
+   *
+   * The request shape (request body sent to `/v1/federation/invoke`) is
+   * `{ tool, arguments, agent_id, justification? }`. `agent_id` is set
+   * by hub-core from the originating MCP session; mcp-server doesn't
+   * forward one explicitly. hub-core defaults to `unknown-agent` if the
+   * call lacks it — see server.ts → handleFederationInvoke.
+   */
+  async invokeFederated(
+    toolName: string,
+    args: Record<string, unknown>,
+  ): Promise<CallToolResponse> {
+    const url = `${this.baseUrl}/v1/federation/invoke`;
+    const payload = { tool: toolName, arguments: args };
+    logger.debug('POST /v1/federation/invoke', { url, tool: toolName });
     const res = await this.request('POST', url, payload);
     const body = (await res.body.json()) as CallToolResponse;
     return {

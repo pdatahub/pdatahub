@@ -3,7 +3,8 @@
  */
 
 export interface ToolDescriptor {
-  /** Abstract tool name (e.g. "calendar.read.events"). */
+  /** Abstract tool name (e.g. "calendar.read.events") or
+   *  Phase 5 synthetic federated descriptor (`federated__<hub>__<tool>`). */
   name: string;
   /** Human-readable description for AI agents. */
   description: string;
@@ -13,6 +14,18 @@ export interface ToolDescriptor {
   scope: string;
   /** Plugin that implements this tool (e.g. "google-calendar"). */
   plugin: string;
+  /** Phase 5 (Federation v2) — `true` for synthetic federated descriptors.
+   *  When set, mcp-server dispatches `callTool(name)` to
+   *  `/v1/federation/invoke` instead of `/v1/tools/:name/call`. */
+  federated?: boolean;
+  /** Phase 5 — `peer_delegations.delegation_id`. Synthetic only. */
+  delegation_id?: string;
+  /** Phase 5 — display name of the peer hub (e.g. "userA"). Synthetic only. */
+  peer_hub_name?: string;
+  /** Phase 5 — peer hub URL (e.g. "http://userA.tailXXXX.ts.net:8080"). */
+  peer_hub_url?: string;
+  /** Phase 5 — ISO 8601 delegation expiry. Synthetic only. */
+  expires_at?: string;
 }
 
 export interface ToolCallResult {

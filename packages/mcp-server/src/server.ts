@@ -92,7 +92,7 @@ export class PdatahubMcpServer {
     for (const tool of tools) {
       this.toolHandlers.set(tool.name, async (args) => {
         try {
-          return await this.hub.callTool(tool.name, args);
+          return await this.dispatchTool(tool, args);
         } catch (err) {
           logger.error('tool call failed', { name: tool.name, error: (err as Error).message });
           throw new McpError(
@@ -119,8 +119,31 @@ export class PdatahubMcpServer {
   private registerOne(tool: ToolDescriptor): void {
     this.tools.set(tool.name, tool);
     this.toolHandlers.set(tool.name, async (args) => {
-      return this.hub.callTool(tool.name, args);
+      return this.dispatchTool(tool, args);
     });
+  }
+
+  /**
+   * Phase 5 — pick the right HubClient method based on whether the
+   * descriptor is a synthetic federated entry (Momus B7). Tools with
+   * `federated: true` (or whose name starts with `federated__`) go to
+   * `hub.invokeFederated` → `/v1/federation/invoke`; everything else
+   * stays on the local `/v1/tools/:name/call` path.
+   *
+   * The `name.startsWith('federated__')` check is a belt-and-braces
+   * defense — hub-core always emits `federated: true` on synthetic
+   * descriptors, so the flag is the authoritative signal. The prefix
+   * check covers the rare case where a caller passes a raw name without
+   * a full descriptor.
+   */
+  private async dispatchTool(
+    tool: ToolDescriptor,
+    args: Record<string, unknown>,
+  ): Promise<CallToolResult> {
+    if (tool.federated || tool.name.startsWith('federated__')) {
+      return this.hub.invokeFederated(tool.name, args);
+    }
+    return this.hub.callTool(tool.name, args);
   }
 
   buildDescription(tool: ToolDescriptor): string {
