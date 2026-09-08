@@ -152,7 +152,7 @@ When A grants, hub produces a base64url-encoded JSON blob:
     "hub_name": "userA",
     "verify_key": "ed25519:abc...",
     "fingerprint": "AB CD EF 01 23 45 67 89",
-    "magic_dns": "userA.tail36274d.ts.net:8080"
+    "magic_dns": "userA.example.ts.net:8080"
   },
   "subject": {
     "verify_key": "ed25519:B_public...",
@@ -306,12 +306,12 @@ $ pdatahub-hub init
   → Encrypted signing_key under master_key
   → Stored in federation_keys table
   → hub_name prompt: "userA"
-  → magic_dns auto-detected: "userA.tail36274d.ts.net" (from `tailscale status`)
+  → magic_dns auto-detected: "userA.example.ts.net" (from `tailscale status`)
 
 $ pdatahub-hub identity show
   Hub name: userA
   Verify key: ed25519:c2OaYBx...
-  Magic DNS: userA.tail36274d.ts.net:8080
+  Magic DNS: userA.example.ts.net:8080
   Fingerprint: AB CD EF 01 23 45 67 89
 ```
 

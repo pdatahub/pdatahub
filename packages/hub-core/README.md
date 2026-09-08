@@ -1,8 +1,14 @@
 # @pdatahub/hub-core
 
-Hub core for pdatahub — approval engine, token vault, audit log, and plugin subprocess manager.
+Hub core for pdatahub — approval engine, token vault, audit log, plugin subprocess manager, and Federation v2 protocol handler.
 
 Replaces the Kotlin `McpHttpServer.kt` + `PluginManager.kt` from the original Android Hub APK. Now runs as a standalone Node.js process on the user's laptop (or home server). The Android APK becomes a thin UI client (approval notifications + audit log viewer).
+
+> **See also:**
+> - [docs/architecture.md](../../docs/architecture.md) — full architecture, end-to-end flow, security model
+> - [docs/threat-model.md](../../docs/threat-model.md) — what we protect and against whom
+> - [docs/federation.md](../../docs/federation.md) — Federation v2 user guide
+> - [docs/self-hosting.md](../../docs/self-hosting.md) — running hub-core on your own hardware
 
 ## Verified end-to-end (2026-09-05)
 
@@ -122,4 +128,4 @@ pnpm lint         # TBD
 
 ## License
 
-MIT
+MIT — see [LICENSE](../../LICENSE).

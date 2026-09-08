@@ -1,6 +1,6 @@
 # @pdatahub/plugin-sdk
 
-The SDK for writing [pdatahub](https://github.com/yourorg/pdatahub) plugins in TypeScript.
+The SDK for writing [pdatahub](https://github.com/pdatahub/pdatahub) plugins in TypeScript.
 
 A pdatahub plugin is an external service connector (Google Calendar, Slack, Trello, GitHub, ...) that runs as a subprocess and communicates with the Hub via [JSON-RPC 2.0](https://www.jsonrpc.org/specification) over stdio.
 
@@ -372,4 +372,8 @@ Debug logs are emitted only when `PDHUB_DEBUG=1`.
 
 ## License
 
-MIT
+MIT — see [LICENSE](../../LICENSE).
+
+---
+
+> **Authoring a plugin?** See [docs/plugin-author-guide.md](../../docs/plugin-author-guide.md) for the end-to-end guide — scaffold, OAuth, packaging, distribution via GitHub Releases. The canonical reference plugin is [`pdatahub-plugin-google-calendar`](https://github.com/pdatahub/pdatahub-plugin-google-calendar).

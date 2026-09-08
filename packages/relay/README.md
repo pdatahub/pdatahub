@@ -2,6 +2,8 @@
 
 Cloudflare Worker relay for Hub-to-laptop WebSocket routing when they are not on the same network.
 
+> **Status:** v0.1.0 stub. End-to-end testable via the vitest suite, not yet wired into hub-core as a default code path. The Tailscale mesh (see [docs/relay-mode.md](../../docs/relay-mode.md)) is the recommended transport today; this Worker is the fallback for environments where Tailscale is blocked.
+
 ```
 ┌──────────────┐      HTTPS       ┌─────────────────┐     WSS     ┌──────────┐
 │  pdatahub-   │ ────────────────► │  Cloudflare     │ ◄────────► │   Hub    │
@@ -80,13 +82,13 @@ pnpm deploy             # wrangler deploy — publishes to Cloudflare edge
 
 After deploy, the Worker is reachable at `https://pdatahub-relay.<your-subdomain>.workers.dev`.
 
-For production, set up a custom domain (e.g. `relay.pdatahub.app`).
+For production, set up a custom domain (e.g. `<relay-url>` — `relay.pdatahub.app` is reserved for the project's hosted deployment; use your own subdomain until the official one is provisioned).
 
 ## Usage from Hub (Kotlin / Android — future)
 
 ```kotlin
 val client = RelayClient(
-    url = "wss://relay.pdatahub.app/sessions/$sessionId/ws",
+    url = "wss://<relay-url>/sessions/$sessionId/ws",
     role = "hub",
     token = hubToken,
 )
@@ -151,4 +153,4 @@ For PoC scale these are not constraints. Real production may need sharding by re
 
 ## License
 
-MIT
+MIT — see [LICENSE](../../LICENSE).

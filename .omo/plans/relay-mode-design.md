@@ -24,7 +24,7 @@
 [Tailscale mesh network]
        │
        ▼
-[Laptop (Tailscale IP 100.79.247.91)]
+[Laptop (Tailscale IP <laptop-tailscale-ip>)]
    └── hub-core binds 0.0.0.0:8080 (no code change)
        └── HTTP API + WebSocket approval stream
 ```
@@ -34,7 +34,7 @@ Setup steps (current):
 2. Auth: `tailscale up` → opens browser OAuth
 3. Install Tailscale on phone (Google Play)
 4. Phone logs in to same Tailscale account
-5. Phone can reach `http://100.79.247.91:8080` from any network
+5. Phone can reach `http://<laptop-tailscale-ip>:8080` from any network
 
 No code changes in hub-core. No new attack surface. WireGuard encryption.
 

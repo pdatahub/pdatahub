@@ -1,14 +1,20 @@
 # @pdatahub/mcp-server
 
-MCP server that bridges AI agents (OpenCode, Claude Code, Cursor, ...) to **pdatahub Hub** running on the user's phone.
+MCP server that bridges AI agents (OpenCode, Claude Code, Cursor, ...) to **pdatahub Hub** running on the user's laptop (or home server).
 
 The Hub owns the data and the OAuth tokens. This server is a thin proxy that:
 
 1. Fetches the user's installed tool list from the Hub on startup
 2. Registers each tool with the MCP server (so the AI agent sees them)
 3. On `tools/call` from the AI agent → forwards to Hub → returns result
+4. For federation v2 calls (synthetic `federated__<peer>__<tool>` names) → forwards to `POST /v1/federation/invoke` on the local hub-core
 
 Hub is the source of truth for tool contracts. This server does not validate args (Hub does that).
+
+> **See also:**
+> - [docs/architecture.md](../../docs/architecture.md) — full architecture
+> - [docs/federation.md](../../docs/federation.md) — how `federated__` routing works
+> - [docs/threat-model.md](../../docs/threat-model.md) — security model
 
 ## Install
 
@@ -169,4 +175,4 @@ Set log level via `--log-level debug` or `PDAHUB_LOG_LEVEL=debug`.
 
 ## License
 
-MIT
+MIT — see [LICENSE](../../LICENSE).

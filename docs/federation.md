@@ -70,14 +70,14 @@ $ pdatahub-hub init --hub-name userA --db-path ~/.local/share/pdatahub/hub.db --
 === FEDERATION IDENTITY ===
 Hub name:      userA
 Verify key:    ed25519:wdlEEYI0rCNkobjR0d1aPJBl6v2HQ4Sqh8C5FZ3mNoE
-Magic DNS:     userA.tail36274d.ts.net:8080
+Magic DNS:     userA.example.ts.net:8080
 Fingerprint:   C1 D9 44 11 82 34 AC 23
-DB:            /home/vlad/.local/share/pdatahub/hub.db
+DB:            /home/userA/.local/share/pdatahub/hub.db
 ```
 
 Copy **the verify key** and **the fingerprint** — B needs them. Share out-of-band (Signal, in person, anything not compromised). Do not paste them into a public chat.
 
-If Tailscale was not running at init time, `Magic DNS` will print `(not detected)`. Re-run `pdatahub-hub identity regen` after Tailscale is up, or pass `HUB_PUBLIC_HOSTNAME=userA.tail36274d.ts.net` when starting the hub.
+If Tailscale was not running at init time, `Magic DNS` will print `(not detected)`. Re-run `pdatahub-hub identity regen` after Tailscale is up, or pass `HUB_PUBLIC_HOSTNAME=userA.example.ts.net` when starting the hub.
 
 ### 3. Initialize B's hub
 
@@ -87,9 +87,9 @@ $ pdatahub-hub init --hub-name userB --db-path ~/.local/share/pdatahub/hub.db --
 === FEDERATION IDENTITY ===
 Hub name:      userB
 Verify key:    ed25519:Q7NFSFHIjVfvxRee7YcN4rXgMzK9wHpaJqL2TuBvC0I
-Magic DNS:     userB.tail36274d.ts.net:8080
+Magic DNS:     userB.example.ts.net:8080
 Fingerprint:   3F 8A 12 9C 44 5B 6D 70
-DB:            /home/vlad/.local/share/pdatahub/hub.db
+DB:            /home/userB/.local/share/pdatahub/hub.db
 ```
 
 A now needs B's verify key and fingerprint too — but only when **A** wants to delegate to **B**. For this walkthrough, A delegates `listEvents` to B, so only B needs to know A's verify key.
@@ -144,13 +144,13 @@ Fingerprint: C1 D9 44 11 82 34 AC 23
 Plugin/Tool: google-calendar / listEvents
 Scope:       calendar:read
 Expires:     2026-09-09 07:36 UTC
-Magic DNS:   userA.tail36274d.ts.net:8080
+Magic DNS:   userA.example.ts.net:8080
 
 Accept this delegation? [y/N] y
 
 Imported delegation: 7f3e2b1a-9c4d-4a72-b8e1-2a5d8f9c0b3e
 Peer:    userA
-Hub URL: http://100.79.247.91:8080/
+Hub URL: http://<peer-host>:8080/
 
 Use "pdatahub-hub delegation list" to view received delegations.
 ```
@@ -190,7 +190,7 @@ $ curl -H "Authorization: Bearer $HUB_API_TOKEN" http://127.0.0.1:8080/v1/tools 
   "federated": true,
   "delegation_id": "7f3e2b1a-9c4d-4a72-b8e1-2a5d8f9c0b3e",
   "peer_hub_name": "userA",
-  "peer_hub_url": "http://100.79.247.91:8080/",
+  "peer_hub_url": "http://<peer-host>:8080/",
   "expires_at": "2026-09-09T07:36:38Z"
 }
 ```
@@ -214,7 +214,7 @@ $ curl -sS -H "Authorization: Bearer $HUB_API_TOKEN" \
 The flow under the hood:
 
 1. **B's hub-core** strips `federated__` → `(peer_hub_name=userA, tool=listEvents)`, looks up the active delegation in `peer_delegations`, and finds the latest `expires_at` row.
-2. **B's hub-core** builds the federation request body, signs it with B's signing key (`X-Federation-Pubkey`, `X-Federation-Signature` headers), and POSTs to `http://100.79.247.91:8080/v1/federation/call`.
+2. **B's hub-core** builds the federation request body, signs it with B's signing key (`X-Federation-Pubkey`, `X-Federation-Signature` headers), and POSTs to `http://<peer-host>:8080/v1/federation/call`.
 3. **A's hub-core** verifies the signature, checks clock skew (±5 min), looks up `delegations.delegation_id`, confirms B is the named peer, and checks the approval stream — A's phone must be connected.
 4. **A's phone** receives an approval notification: *"userB's agent **opencode** requests **listEvents** on your Google Calendar"*. User taps Approve (with biometric if enabled).
 5. **A's hub-core** invokes the google-calendar plugin with **A's** decrypted OAuth token from A's vault, returns the result to B.

@@ -137,7 +137,7 @@ Phase 1A always exits after the dry-run line. Phase 1B wires `--dry-run=false` t
 | **5** | Federation interop tests (cloud ↔ self-hosted) | ⏳ |
 | **6** | HTTPS via Tailscale Serve + monitoring + launch | ⏳ |
 
-See design doc: `~/Документы/Obsidian/Работа/Personal Data Hub/Personal Data Hub — Cloud v3 Design.md`.
+See design doc: [`.omo/plans/cloud-v3-design.md`](../../.omo/plans/cloud-v3-design.md).
 
 ## CI
 
@@ -154,4 +154,4 @@ See design doc: `~/Документы/Obsidian/Работа/Personal Data Hub/Pe
 
 ## License
 
-MIT.
+MIT — see [LICENSE](../../LICENSE).

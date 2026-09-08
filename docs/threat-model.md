@@ -1,0 +1,409 @@
+# Threat Model
+
+> **Audience:** engineers contributing to pdatahub, security researchers evaluating it, and self-hosters deciding what residual risk they're accepting.
+>
+> **Scope:** hub-core, mcp-server, plugin-sdk, relay, android-app, runner. Federation v2 is in scope as of v0.1.0 (2026-09-08). Cloud v3 design is documented in `.omo/plans/cloud-v3-design.md`; its threat model inherits from this one with per-tenant isolation additions.
+>
+> **Style:** direct, decision-complete. We name the adversary, the asset, the mitigation, and what we deliberately deferred.
+
+## Asset model — what we protect
+
+| # | Asset | Where it lives | Sensitivity |
+|---|-------|----------------|-------------|
+| 1 | **OAuth access tokens** for each plugin | Encrypted at rest in `tokens` table on hub | High — these grant upstream API access on the user's behalf |
+| 2 | **OAuth refresh tokens** for each plugin | Same — encrypted with the access token | High — long-lived; theft = indefinite upstream access |
+| 3 | **Grant data** (who approved what, when, expires, scope) | `grants` table on hub | Medium — disclosure reveals usage patterns |
+| 4 | **Audit log** (every approval, every call, every decision) | Append-only `audit_log` table | Medium-high — tampering invalidates the whole security model |
+| 5 | **User identity (Ed25519 signing key)** for federation v2 | Encrypted at rest under master key, in memory while hub runs | High — compromise allows forging delegation blobs |
+| 6 | **Master key** (the secret that decrypts everything) | Memory while hub runs; user keeps a backup | Critical — compromise = full data exfiltration |
+| 7 | **Plugin source code integrity** | On disk in `--plugins-dir` | Medium — modified plugin can do anything the user can |
+| 8 | **Hub API token** (`HUB_API_TOKEN`) | Env var on laptop; user-supplied | High — anyone with it can issue calls on the user's behalf |
+| 9 | **BIP-39 mnemonic** (used to derive a fresh master key for backup/restore) | User-managed (password manager, paper) | Critical — same blast radius as master key |
+
+The "user" throughout this doc is a single individual running hub-core on a personal device (laptop or home server). When we say "phone," we mean the user's Android phone running the pdatahub Android app.
+
+## Adversary model — who we designed against
+
+We enumerate adversaries by **capability**, ordered roughly from least to most powerful. The mitigations assume the adversary has substantial capability unless noted.
+
+### A1. Compromised plugin
+
+A plugin author is malicious, or a legitimate plugin has a vulnerability. The plugin runs as a subprocess and has access to its own scope.
+
+- **Can:** make any HTTP request to its declared service within the granted scope; read whatever the upstream API returns; call its own `@Tool`-decorated methods repeatedly.
+- **Cannot (today):** see the raw OAuth token; see other plugins' tokens; touch `hub.db` directly; talk to another plugin's subprocess; impersonate the hub to the upstream service.
+- **Cannot (post-v4 with V8 isolates):** access Node.js globals outside its sandbox.
+
+### A2. Malicious AI agent
+
+The AI agent (OpenCode, Claude Code, Cursor, custom) is either honest-but-curious (calls things the user didn't intend) or actively malicious (compromised LLM weights, prompt injection, malicious tool description).
+- **Can:** issue any tool call via MCP, with arbitrary arguments.
+- **Cannot:** bypass phone approval (default mode); read data outside granted scope; persist beyond session lifetime (grants expire after 1h).
+
+### A3. Network attacker
+
+An attacker on the path between hub-core and the external service (e.g. compromised router, BGP hijack, on-path TLS termination by a corporate middlebox), or between hub-core and the phone.
+- **Can:** intercept traffic if not encrypted; replay captured packets; inject packets.
+- **Cannot (with default config):** break TLS to upstream APIs (the SDK uses native `fetch` with TLS); break WireGuard between hub and phone (Tailscale); break HTTPS to Cloudflare Worker (the relay uses TLS termination).
+
+### A4. Compromised phone (with biometric)
+
+The phone is stolen or has malware. The attacker has the user's biometric (or knows the PIN).
+- **Can:** approve any tool call; read the audit log; generate new delegations (federation v2).
+- **Cannot:** read the master key (it's on the laptop, not the phone); exfiltrate hub database (it's on the laptop); impersonate the phone to a different hub (per-device session token).
+
+### A5. Compromised laptop
+
+The laptop is stolen or has malware running as the user. The attacker has full disk access and process privileges.
+- **Can:** read `hub.db` (decrypts with master key from env or memory); read `HUB_API_TOKEN`; impersonate the user to all upstream services; revoke all grants; issue any audit row.
+- **Cannot:** magically decrypt master key from a separate device (master key never persisted in plaintext to disk; only in process memory and in user's password manager).
+- **Residual risk:** the user accepts this. Self-hosting puts the laptop in the trust boundary. Cloud v3 with HSM-backed keys addresses it.
+
+### A6. Compromised peer hub (federation v2)
+
+User B's hub is compromised. B delegates a tool from B's hub to User A's hub (or vice versa). The compromised hub has the delegation blob and B's signing key.
+- **Can (today):** issue federated calls within the delegation scope; replay `request_id` (mitigated by nonce dedup within 10 min); spam approvals (mitigated by 10/60s rate limit per `(peer_verify_key, agent_id)`).
+- **Cannot:** see A's OAuth token; forge a delegation blob signed by A; escalate scope; extend the delegation past `expires_at`; bypass A's phone approval.
+
+### A7. Cloud v3 operator (Hetzner / Cloudflare / us)
+
+Adversary for the future Cloud v3 product. Inherits A5 plus:
+- **Can:** see all customers' data on shared infrastructure; mine audit logs across tenants.
+- **Cannot (with proper isolation):** see plaintext OAuth tokens (per-tenant encryption keys in v3.1); cross tenant boundaries (DB-per-tenant + dedicated VM in v3); tamper with audit logs (append-only enforcement + replication).
+
+We are **not** designing against a Cloud operator today — that's a separate threat model. For self-hosted (current), A5 is the residual risk.
+
+## Trust boundaries
+
+```
+              (A) TRUSTED                      (B) SEMI-TRUSTED
+              ──────────                       ──────────────────
+
+  User's laptop                Hub process                Plugin subprocess
+  ┌──────────────┐             ┌──────────────┐            ┌──────────────┐
+  │ Master key   │────────────►│ Vault        │───AES───► │ Decrypted    │
+  │ HUB_API_TOKEN│  in-memory  │ Audit log    │  key       │ access_token │
+  │ hub.db       │             │ Grants       │            │ (per call)   │
+  └──────────────┘             └──────┬───────┘            └──────┬───────┘
+        ▲                             │                           │
+        │ WebSocket                   │ JSON-RPC                  │ HTTPS + Bearer
+        │ /approval-stream            │ stdio                     │ to upstream API
+        │                             ▼                           ▼
+  ┌─────┴──────────┐           (B) UNTRUSTED                  (C) UPSTREAM
+  │ Android phone  │                                             (Google, Slack, etc.)
+  │ • Pairing      │           Network: Tailscale mesh              ▲
+  │ • Approval UI  │           Encryption: WireGuard                │
+  │ • Audit viewer │           Auth: HUB_API_TOKEN                  │
+  └────────────────┘                                                │
+                                                                     │
+              (A) TRUSTED                                            │
+              User B's hub (federation v2) ──────── Ed25519 ─────────┘
+              ┌──────────────────────────────┐
+              │ Ed25519 signing key          │
+              │ peer_delegations table       │
+              │ /v1/federation/invoke handler│
+              └──────────────┬───────────────┘
+                             │ HTTP over tailnet, signed
+                             ▼
+              User A's /v1/federation/call (this hub)
+```
+
+### What's trusted vs untrusted at each boundary
+
+| Boundary | Trusted side | Untrusted side | What crosses |
+|----------|--------------|----------------|--------------|
+| Hub ↔ Phone | Hub | Phone (treat as untrusted input source) | WebSocket frames: `approval_decided`, `ping`; **never** trust approval without biometric verification flag |
+| Hub ↔ Plugin subprocess | Hub | Plugin (semi-trusted) | JSON-RPC requests with `context.token` injected by Hub. Plugin reads token from context, never from stdout. |
+| Hub ↔ Upstream API | Hub | Network (TLS) | HTTPS with Bearer token. Certificate validation on by default. |
+| Hub A ↔ Hub B (federation) | Hub A (data owner) | Hub B (peer) | HTTP over tailnet, signed with B's Ed25519 key. A's OAuth token NEVER crosses. |
+| Hub ↔ MCP client (mcp-server) | Hub | MCP client | HTTP with `HUB_API_TOKEN`. All calls go through approval flow unless granted. |
+
+## Security mechanisms — what's actually shipped
+
+### Token vault (AES-256-GCM, HKDF per-plugin)
+
+```
+master_key (32 bytes, from --master-key CLI flag or HUB_MASTER_KEY env)
+   │
+   │ HKDF-SHA256(
+   │   ikm  = master_key,
+   │   salt = plugin_name (e.g., "google-calendar"),
+   │   info = "pdatahub-token-vault-v1",
+   │   length = 32
+   │ )
+   │
+   ▼
+per_plugin_key (32 bytes, AES-256)
+   │
+   │ AES-256-GCM(
+   │   key = per_plugin_key,
+   │   iv  = random 12 bytes,
+   │   plaintext = access_token (or refresh_token)
+   │ )
+   │
+   ▼
+stored in SQLite: access_token_enc, access_token_iv, access_token_tag
+```
+
+**Why per-plugin key:** if one plugin is compromised, the attacker cannot decrypt another plugin's tokens without also compromising the master key. The master key is never persisted to disk in plaintext; it lives in process memory for the lifetime of the hub process.
+
+**Why `info = "pdatahub-token-vault-v1"`:** salt + info prefix allows future rotation. A future `v2` can use a different `info` string without breaking `v1` decryption (and vice versa, if we ever need to).
+
+**Why AES-256-GCM:** authenticated encryption with associated data. We don't use AES-CBC or AES-CTR; both are footguns (CBC has no authentication, CTR has no authentication; AEAD ciphers do both).
+
+**Source:** `packages/hub-core/src/vault.ts`.
+
+### Plugin isolation (subprocess + JSON-RPC over stdio)
+
+Plugins are spawned as separate Node.js processes. Communication is JSON-RPC 2.0 over `stdin`/`stdout`. The plugin:
+
+- **Never sees** the master key, other plugins' tokens, `HUB_API_TOKEN`, or other plugins' source code.
+- **Receives only** its own decrypted access_token (in the call `context`), the arguments passed by the AI agent, and `agent_id` / `request_id` for audit correlation.
+- **Cannot** write to `hub.db` directly. It can only return tool results over JSON-RPC.
+- **Cannot** read `~/.local/share/pdatahub/` outside `--plugins-dir`. Hub's process privileges don't extend to the plugin subprocess (the plugin runs as the same OS user, but has no direct file access — only the hub does).
+
+**Limitation (v0.x):** the plugin shares Node.js's V8 globals (`process`, `global`, etc.) inside its own process. A memory-corruption vulnerability in Node.js or a malicious Node.js native module could theoretically reach the hub process. **v4 introduces V8 isolates for memory isolation** — see [Out of scope](#out-of-scope-current-limitations).
+
+**Source:** `packages/hub-core/src/plugin-process.ts`.
+
+### Per-action approval
+
+Every tool call triggers an approval request to the phone over WebSocket:
+
+```json
+{
+  "type": "approval_request",
+  "request_id": "uuid-v4",
+  "agent_id": "opencode",
+  "tool_name": "listEvents",
+  "plugin": "google-calendar",
+  "scope": "calendar:read",
+  "justification": "User asked for today's events",
+  "created_at": "2026-09-07T12:34:56Z"
+}
+```
+
+The phone displays a notification. The user taps Approve or Deny. If biometric is enabled, the OS prompts for fingerprint/face before sending `approval_decided`.
+
+Approval timeout: **60 seconds**. If the phone doesn't respond, the call returns `403 APPROVAL_DENIED`. This bounds the latency for a compromised/disabled phone.
+
+**Source:** `packages/hub-core/src/approval-stream.ts`, `packages/android-app/app/src/main/kotlin/.../PendingApprovalsCard.kt`.
+
+### Time-bounded grants
+
+A successful approval creates a grant:
+
+```sql
+INSERT INTO grants (
+  grant_id,    -- uuid v4
+  agent_id,    -- "opencode", "claude-code", ...
+  plugin,      -- "google-calendar"
+  tool,        -- "listEvents"
+  scope,       -- "calendar:read"
+  expires_at,  -- now + 3600s
+  revoked,     -- 0
+  created_at   -- now
+);
+```
+
+`expires_at` is checked on every access via `GrantStore.isValid(grant_id)`. Default lifetime: **1 hour**. Lazy cleanup — expired rows stay in the DB until periodic GC (Cloud v3) or manual cleanup.
+
+The grant key is `(agent_id, plugin, tool)`. If the same agent calls the same tool within the hour, the existing grant is reused without re-approval. If a different agent calls the same tool, a new approval is required.
+
+**Source:** `packages/hub-core/src/grant-store.ts`.
+
+### Lazy revocation
+
+`POST /v1/grants/:id/revoke` flips `revoked = 1`. The next call fails with `403 GRANT_REVOKED`. The user can also flip from the Android app's Active Grants list.
+
+Latency for next-access denial: **<2 seconds** in practice. There's no need for a hub to actively poll for revocation; the next call's `isValid()` check picks it up.
+
+**Limitation (federation v2):** when A revokes a delegation, B does not learn until B's next call returns `403 DELEGATION_REVOKED`. B's `peer_delegations.revoked` flag is **not** auto-flipped. v3 will broadcast signed revocation.
+
+### Audit log (append-only SQLite)
+
+Every tool call, approval, denial, plugin error, and OAuth event writes an audit row:
+
+```sql
+CREATE TABLE audit_log (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  created_at      TEXT    NOT NULL,
+  agent_id        TEXT,
+  tool_name       TEXT,
+  plugin          TEXT,
+  scope           TEXT,
+  decision        TEXT,    -- 'approved' / 'denied' / 'error'
+  decision_federated TEXT, -- 'federated_ok' / 'federated_denied' / 'federated_error' / NULL
+  delegated_by    TEXT,    -- peer's verify_key (federation only)
+  delegated_to    TEXT,    -- peer's verify_key (federation only)
+  user_id         TEXT,    -- always 'local-user' on the data-owning hub
+  justification   TEXT,
+  duration_ms     INTEGER
+);
+```
+
+Append-only is enforced by triggers: any UPDATE or DELETE on `audit_log` raises a SQL error. The audit log is the **single source of truth** for "what happened."
+
+A WebSocket broadcasts new audit rows to the Android phone (`{ type: 'audit_update', entry: ... }`). The user sees their AI agent's actions in real time.
+
+**Limitation:** append-only is process-level. A determined attacker with hub process access can DROP the audit table or open the SQLite file with `sqlite3` and rewrite history. **Hardware-rooted attestation (TPM/HSM) is the next-level mitigation** — see [Future hardening](#future-hardening).
+
+**Source:** `packages/hub-core/src/audit-log.ts`.
+
+### OAuth injection via SDK
+
+The Hub decrypts the access token from the vault right before invoking the plugin. The token is then injected via the JSON-RPC `context` field:
+
+```ts
+// packages/hub-core/src/server.ts (handleToolCall)
+const tokens = this.opts.tokens.get(grant.plugin);
+const result = await plugin.callTool(toolName, args, {
+  agent_id, request_id,
+  token: tokens.access_token,  // ← injected, plugin reads from context
+});
+```
+
+The plugin SDK exposes `this.http` as a wrapper that auto-adds `Authorization: Bearer ${this.context.token}`. The plugin never sees the token as a literal string it could log or exfiltrate; it only sees authenticated requests it made through `this.http`.
+
+**Source:** `packages/plugin-sdk/src/http-client.ts`.
+
+### Federation inbound security (13 steps)
+
+When Hub A receives a federated call from Hub B on `POST /v1/federation/call`:
+
+1. **Body size limit** — reject if > 256 KB.
+2. **Header parse** — extract `X-Federation-Pubkey`, `X-Federation-Signature`.
+3. **Signature verification** — Ed25519 verify over canonical JSON of body.
+4. **Clock skew check** — `now - request.timestamp` must be in [-300s, +300s].
+5. **Nonce dedup** — reject if `(peer_verify_key, request_id)` seen in last 10 minutes.
+6. **Rate limit** — `(peer_verify_key, agent_id)` allowed ≤10 pending approvals per 60s; else `429 RATE_LIMIT`.
+7. **Delegation lookup** — `peer_delegations` table by `delegation_id` from body.
+8. **Delegation expiry** — `now < delegation.expires_at`.
+9. **Delegation revocation** — `delegation.revoked = 0`.
+10. **Peer match** — `delegation.peer_verify_key == X-Federation-Pubkey`.
+11. **Scope match** — request scope is allowed by delegation scope.
+12. **Approval stream check** — `clients.aud.size > 0` else `503 NO_APPROVER_CONNECTED` (fast-fail; don't burn 60s timeout).
+13. **Approval flow** — normal per-action approval on A's phone; A's hub executes the plugin with A's token; result returns to B.
+
+Steps 1–2 are pure parsing. Steps 3–11 are pure validation. Step 12 is the fast-fail UX optimization. Step 13 is the actual call.
+
+**Source:** `packages/hub-core/src/federation/call-handler.ts`, `packages/hub-core/src/federation/nonces.ts`.
+
+### Hard-fail on missing HUB_API_TOKEN
+
+If `HUB_API_TOKEN` is unset AND the hub binds to a non-loopback interface, the hub **refuses to start**:
+
+```
+HUB_API_TOKEN must be set when binding to a non-loopback interface.
+For local development only, bind to 127.0.0.1.
+```
+
+This closes the previous dev-default behavior — "log a warning, allow unauthenticated access" — which was a footgun: any user running `pdatahub-hub --bind 0.0.0.0` without setting a token would expose `/v1/*` on their tailnet unauthenticated.
+
+Loopback binds (127.0.0.1, ::1, localhost) preserve the dev convenience.
+
+**Source:** `packages/hub-core/src/server.ts`.
+
+### Proactive OAuth refresh
+
+`TokenVault.isExpiringSoon(plugin)` is checked before each tool call. If the access token expires within 5 minutes, the vault refreshes it via the `refresh_token` and updates the stored ciphertext. The plugin never knows.
+
+Failure modes:
+- Refresh fails (e.g. user revoked at the provider) — hub logs a warning, continues with the existing token. The next upstream call returns 401, plugin surfaces the error to the AI agent.
+- No refresh token — falls back to requiring re-authentication when the access token expires.
+
+**Source:** `packages/hub-core/src/vault.ts`.
+
+### BIP-39 encrypted backup
+
+Hub state can be exported to an encrypted file using a 12-word BIP-39 mnemonic:
+
+```bash
+pdatahub-hub backup --output ~/.pdatahub-backup --master-key "$MASTER_KEY"
+# Prints mnemonic, writes encrypted SQLite dump
+```
+
+To restore on a fresh machine:
+
+```bash
+pdatahub-hub restore --input ~/.pdatahub-backup \
+  --master-key "$(echo 'word1 word2 ... word12' | mnemonic-to-hex)"
+```
+
+The mnemonic is a fallback for master key loss. Write it on paper; don't store digitally.
+
+**Source:** `packages/hub-core/src/backup.ts`.
+
+## Out of scope (current limitations)
+
+These are **accepted residual risks** in v0.x. We are explicit about them so users can make informed decisions.
+
+| Limitation | Today's mitigation | Lands in |
+|------------|-------------------|----------|
+| **V8 isolate plugin isolation** — plugins share Node.js V8 globals. A memory-corruption vulnerability could escape the subprocess sandbox. | Subprocess isolation is in place; rely on Node.js security updates; install only trusted plugins. | v4 (2027+) |
+| **No key rotation (`key_epoch`)** — once master key is set, you cannot rotate without re-authenticating every plugin. | BIP-39 backup + restore on a fresh master key if compromised. | v3.1 |
+| **No per-tenant encryption keys in Cloud v3** — all cloud users share one master key, with multi-VM isolation. | Physical VM isolation; master key in memory only. | Cloud v3.1 |
+| **No WebAuthn / phone OTP** for hub-core admin actions (init, restore). | Master key + BIP-39 mnemonic only. | v3.5 |
+| **No plugin signature verification** — plugins are trusted by URL/path. | Distribute via signed GitHub Releases; SHA256 in release notes. | v3.1 |
+| **Tailscale dependency for phone approval** — if Tailscale is blocked, only USB tether works. | `adb reverse` fallback; Cloudflare Worker relay ships in stub. | relay v1 (production hardening) |
+| **Federation: no signed revocation broadcast** — when A revokes, B learns on next call. | B can manually delete `peer_delegations` row. | v3 |
+| **Federation: no perfect forward secrecy** — Ed25519 doesn't ratchet. | Per-call phone approval is the backstop. | v3.1 (`key_epoch`) |
+| **Cloud v3: cross-tenant log mining** — operator can correlate logs across users on shared infra. | Separate VMs per tenant; audit log kept on the VM, not centralized. | Cloud v3.1 (per-tenant encryption) |
+| **Local-attacker bypass of audit log** — process-level attacker can `DROP TABLE audit_log`. | Rely on host security (full-disk encryption, screen lock, no shared laptops). | v4 (TPM attestation) |
+
+## Future hardening
+
+| Mitigation | When | Threat addressed |
+|-----------|------|------------------|
+| **Hardware Security Module (HSM) for master key** | v4 | A5 (compromised laptop) loses master key access |
+| **TPM-backed hub attestation** | v4 | A5 cannot tamper with audit log or token vault unnoticed |
+| **OAuth step-up auth for high-risk scopes** | v3 | A2 (malicious agent) needs extra verification for `calendar:write`, `mail:send`, etc. |
+| **WebAuthn for hub-core admin actions** | v3.5 | A4 (compromised phone) cannot rotate master key without physical security key |
+| **Plugin signature verification** | v3.1 | A1 (malicious plugin) cannot impersonate a legitimate one |
+| **Per-tenant encryption keys (Cloud v3.1)** | Cloud v3.1 | A7 (Cloud operator) cannot read OAuth tokens |
+| **`key_epoch` for key rotation** | v3.1 | Master key compromise is bounded; rotate without re-auth |
+| **Signed revocation broadcast (federation)** | v3 | A6 (compromised peer hub) cannot continue using revoked delegations silently |
+| **V8 isolate plugin isolation** | v4 | A1 cannot escape subprocess sandbox via V8 bug |
+
+## Audit history
+
+### Federation v2 design — Momus round 1 (2026-09-07)
+
+7 blockers, 5 spec contradictions, 10 important findings. **All addressed.** Highlights:
+
+- **B1 (blocker):** Federation needs different auth per route (`none` for `/v1/identity`, `bearer` for local, `ed25519` for federation). Single Bearer check is wrong. → Added `RouteAuth` table.
+- **B2 (blocker):** Hub starting on non-loopback without `HUB_API_TOKEN` is a footgun. → Hard-fail added.
+- **B4 (blocker):** `user_id` semantics were ambiguous between local and federated. → Decided to keep `'local-user'` as "this hub's data" forever; federation context carried by `delegated_by`/`delegated_to`.
+- **B5 (blocker):** No schema migration framework. → Added versioned migration runner.
+- **C1 (spec contradiction):** `delegated_by` missing from `ensureGrant` match key. → Migration v4 adds column; match key updated.
+- **C2 (spec contradiction):** `user_id` rename would break every existing install. → Decision to keep `'local-user'`.
+- **C3 (spec contradiction):** Single `decision` field couldn't represent local approval vs federation result. → Added `decision_federated` field.
+
+Full findings: `.omo/plans/federation-v2-design.md` (in-file annotations).
+
+### Federation v2 design — Momus round 2 (2026-09-08)
+
+4 final doc fixes — **all applied**. Cross-references in the federation user guide were updated to match the canonical naming.
+
+### Cloud v3 design — Momus round 1 (2026-09-08)
+
+**OKAY.** References verified; Phase 1A design verified done. No blockers.
+
+### Future audits
+
+- **External audit** planned before v1.0.0. We will commission a third-party review of hub-core, plugin-sdk, and federation protocol.
+- **Bug bounty** planned at v1.0.0. See [SECURITY.md §Hall of fame](../SECURITY.md#hall-of-fame).
+
+## Decision record
+
+For the reasoning behind specific design choices (why Ed25519, why HKDF, why per-plugin keys, why 1h grants, why 60s approval timeout, why no V8 isolates yet), see the relevant sections of:
+
+- [docs/architecture.md §Security model](./architecture.md#security-model) — token vault, plugin isolation, approval flow
+- [docs/architecture.md §Federation v2](./architecture.md#federation-v2) — federation protocol design
+- [docs/federation.md](./federation.md) — user-facing federation guide with threat-model TL;DR
+- [.omo/plans/federation-v2-design.md](../.omo/plans/federation-v2-design.md) — RFC-level design with Momus annotations
+- [.omo/plans/cloud-v3-design.md](../.omo/plans/cloud-v3-design.md) — Cloud v3 design
+
+---
+
+If you're a security researcher and you find something we haven't, see [SECURITY.md](../SECURITY.md) for the disclosure process.

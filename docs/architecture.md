@@ -397,7 +397,7 @@ A federated tool appears in `GET /v1/tools` with `federated: true` and a synthet
   "federated": true,
   "delegation_id": "7f3e2b1a-9c4d-4a72-b8e1-2a5d8f9c0b3e",
   "peer_hub_name": "userA",
-  "peer_hub_url": "http://100.79.247.91:8080/",
+  "peer_hub_url": "http://<peer-host>:8080/",
   "expires_at": "2026-09-09T07:36:38Z"
 }
 ```

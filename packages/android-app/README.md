@@ -160,4 +160,4 @@ On 2026-09-05, the full flow was tested on Honor CMA-LX1:
 
 ## License
 
-MIT
+MIT — see [LICENSE](../../LICENSE).
