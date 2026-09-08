@@ -84,6 +84,7 @@
 | [`packages/plugin-sdk/`](./packages/plugin-sdk/) | TypeScript SDK for plugin authors | ✅ v0.1.0 — GitHub Releases |
 | [`packages/relay/`](./packages/relay/) | Cloudflare Worker relay (cross-network pairing) | ✅ v0.1.0 |
 | [`packages/android-app/`](./packages/android-app/) | Android UI client (approval + audit) | ✅ v0.1.0 — debug build on Honor CMA-LX1 |
+| [`packages/runner/`](./packages/runner/) | Go control-plane daemon (Hetzner VM provisioning + hub-core deploy) | 🚧 Phase 1A skeleton — mocked Hetzner, cloud-init generator, deploy planner |
 
 ## External repos
 
@@ -233,8 +234,9 @@ Use the MagicDNS hostname in `hub_core_url` and Google Cloud Console redirect UR
   - Phase 7+7b — User documentation + audit retention CLI (`pdatahub-hub audit purge --older-than Nd`) (2026-09-08)
   - Phase 8a+8b — Multi-process integration + adversarial tests (`federation-multi-process.test.ts`, `federation-adversarial.test.ts`) — 11 new tests, 321 total passing (2026-09-08)
 - 🚧 pdatahub Cloud v3 — Hosted Hub SaaS
+  - **Phase 1A in progress** — Go module skeleton at [`packages/runner/`](./packages/runner/) with mocked Hetzner client, cloud-init generator, SSH key generator, hub-core deploy planner, and unit tests. Phase 1B wires real provisioning + SSH executor + health monitor.
 
-See [`docs/architecture.md`](./docs/architecture.md) for detailed e2e flow, security model, and plugin lifecycle. See [`docs/federation.md`](./docs/federation.md) for the federation walkthrough.
+See [`docs/architecture.md`](./docs/architecture.md) for detailed e2e flow, security model, and plugin lifecycle. See [`docs/federation.md`](./docs/federation.md) for the federation walkthrough. See [`packages/runner/README.md`](./packages/runner/README.md) for the Cloud v3 control-plane design.
 
 ## License
 

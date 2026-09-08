@@ -11,6 +11,29 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    name: Detect changed paths
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    # Pure docs-only changes don't need the Go toolchain (~30s install).
+    # This filter narrows the runner job to runner-touching PRs only.
+    outputs:
+      runner: ${{ steps.filter.outputs.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          # Trigger the go-runner job when any of these change.
+          # Also fires on push to main so the job runs nightly / per-push.
+          filters: |
+            runner:
+              - 'packages/runner/**'
+              - '.github/workflows/ci.yml'
+
   typescript:
     name: TypeScript (lint + test + build)
     runs-on: ubuntu-latest
@@ -39,6 +62,49 @@ jobs:
 
       - name: Build
         run: pnpm build
+
+  go-runner:
+    name: Go runner (vet + test + build)
+    needs: changes
+    if: needs.changes.outputs.runner == 'true' || github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache-dependency-path: packages/runner/go.sum
+
+      - name: Download modules
+        working-directory: packages/runner
+        run: go mod download
+
+      - name: Vet
+        working-directory: packages/runner
+        run: go vet ./...
+
+      - name: Test (race + coverage)
+        working-directory: packages/runner
+        run: go test ./... -race -coverprofile=coverage.out
+
+      - name: Build
+        working-directory: packages/runner
+        run: go build ./...
+
+      - name: Dry-run smoke
+        working-directory: packages/runner
+        run: go run ./cmd/runner --dry-run
+
+      - name: Upload coverage
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runner-coverage
+          path: packages/runner/coverage.out
+          retention-days: 7
 
   android:
     name: Android (assemble + test)
