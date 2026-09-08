@@ -3,6 +3,31 @@
 All notable changes to pdatahub are documented here. Dates are in `YYYY-MM-DD` format. Versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+## [0.2.0] — 2026-09-08
+
+### Added
+
+- **Plugin SDK v2**: typed errors, JSON Schema validation, lifecycle hooks, protocol versioning, testing utilities.
+- Typed error hierarchy (`PluginError`, `AuthError`, `AuthExpiredError`, `ScopeError`, `NetworkError`, `ValidationError`, `TimeoutError`, `NotFoundError`, `RateLimitError`) with `code`, `retryable`, `details`, `toJSON()`.
+- JSON Schema validation via ajv — opt-in via `@Tool({ inputSchema })`.
+- Lifecycle hooks: `onInstall()`, `onUninstall()`, `onActivate()`, `onDeactivate()`, `health()`.
+- Protocol versioning: `protocolVersion: 1 | 2` field in manifest + `capabilities` detection.
+- Testing utilities: `createMockHub()`, `MockHttpClient` (shares `mapUpstreamError` with real `HttpClient`).
+- HTTP client typed error mapping: 401/403/404/429/5xx → typed `PluginError` subclasses.
+
+### Changed
+
+- Hub-core integrates SDK v2: routes `PluginError` → 401/403/400/404/502/500 with proper MCP error shape.
+- Audit log migration v6: adds `error_class` + `error_code` columns.
+- ApprovalStream: new `broadcastPluginReauth()` triggers phone notification on `AuthExpiredError`.
+- Plugin process: handles `plugin.lifecycle` JSON-RPC with timeout (5s health, 30s others).
+
+### Backward Compatibility
+
+- v1 plugins (no `protocolVersion` set) default to 1, no behavior change.
+- 51 pre-existing tests in plugin-sdk continue to pass.
+- 334 pre-existing tests in hub-core continue to pass.
+
 
 ### Added
 
