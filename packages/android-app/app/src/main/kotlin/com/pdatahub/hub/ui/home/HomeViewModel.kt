@@ -91,10 +91,13 @@ class HomeViewModel @Inject constructor(
                             agent_id = p.agent_id,
                             user_id = "local-user",
                             tool_name = p.tool_name,
-                            plugin = "",
-                            scope = "",
+                            plugin = p.plugin.orEmpty(),
+                            scope = p.scope.orEmpty(),
                             decision = p.decision,
                             duration_ms = 0,
+                            delegated_by = p.delegated_by,
+                            delegated_to = p.delegated_to,
+                            decision_federated = p.decision_federated,
                         )
                         val updated: List<AuditEntry> = listOf(entry) + _state.value.auditHistory
                         _state.value = _state.value.copy(auditHistory = updated.take(50))

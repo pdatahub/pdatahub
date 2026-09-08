@@ -30,7 +30,7 @@ import javax.inject.Singleton
 class HubCoreApi @Inject constructor(
     private val settings: SettingsRepository,
     private val okHttpClient: OkHttpClient,
-) {
+) : HubIdentitySource, DelegationSource {
     private val json = Json { ignoreUnknownKeys = true }
     private val jsonMediaType = "application/json".toMediaType()
 
@@ -81,6 +81,42 @@ class HubCoreApi @Inject constructor(
             json.decodeFromString<AuditResponse>(body).entries
         }
     }
+
+    override suspend fun getIdentity(): IdentityResponse = withContext(Dispatchers.IO) {
+        val req = Request.Builder()
+            .url("${baseUrl()}/v1/identity")
+            .get()
+            .build()
+        okHttpClient.newCall(req).execute().use { resp ->
+            if (!resp.isSuccessful) throw HttpException(resp.code, "getIdentity")
+            val body = resp.body?.string().orEmpty()
+            json.decodeFromString<IdentityResponse>(body)
+        }
+    }
+
+    override suspend fun getDelegations(): DelegationsResponse = withContext(Dispatchers.IO) {
+        val req = authHeader(
+            Request.Builder()
+                .url("${baseUrl()}/v1/federation/delegations")
+                .get()
+        ).build()
+        okHttpClient.newCall(req).execute().use { resp ->
+            if (!resp.isSuccessful) throw HttpException(resp.code, "getDelegations")
+            val body = resp.body?.string().orEmpty()
+            json.decodeFromString<DelegationsResponse>(body)
+        }
+    }
+
+    override suspend fun revokeDelegation(delegationId: String): Boolean = withContext(Dispatchers.IO) {
+        val req = authHeader(
+            Request.Builder()
+                .url("${baseUrl()}/v1/federation/delegations/$delegationId/revoke")
+                .post("".toRequestBody(jsonMediaType))
+        ).build()
+        okHttpClient.newCall(req).execute().use { resp ->
+            resp.isSuccessful
+        }
+    }
 }
 
 class HttpException(val code: Int, val op: String) : Exception("HTTP $code from $op")
@@ -96,6 +132,7 @@ data class Grant(
     val created_at: String,
     val expires_at: String,
     val revoked: Boolean,
+    val delegated_by: String? = null,
 )
 
 @Serializable
@@ -115,7 +152,39 @@ data class AuditEntry(
     val grant_id: String? = null,
     val duration_ms: Int,
     val error: String? = null,
+    val delegated_by: String? = null,
+    val delegated_to: String? = null,
+    val decision_federated: String? = null,
 )
 
 @Serializable
 data class AuditResponse(val entries: List<AuditEntry>)
+
+@Serializable
+data class IdentityResponse(
+    val verify_key: String,
+    val hub_name: String,
+    val magic_dns: String? = null,
+    val fingerprint: String,
+)
+
+@Serializable
+data class DelegationGranted(
+    val delegation_id: String,
+    val peer_verify_key: String,
+    val peer_hub_name: String? = null,
+    val plugin: String,
+    val tool: String,
+    val scope: String,
+    val expires_at: String,
+    val revoked: Int = 0,
+    val created_at: String,
+) {
+    val isRevoked: Boolean get() = revoked != 0
+}
+
+@Serializable
+data class DelegationsResponse(
+    val granted: List<DelegationGranted> = emptyList(),
+    val received: List<DelegationGranted> = emptyList(),
+)

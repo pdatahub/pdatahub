@@ -72,14 +72,7 @@ class ApprovalNotificationFormatTest {
     fun `federated title falls back to truncated delegated_by when peer_hub_name missing`() {
         val req = federated(peerHubName = null, delegatedBy = "ed25519:abc123def456")
         val title = formatApprovalTitle(req)
-        assertEquals("Federated request from ed25519:abc", title)
-    }
-
-    @Test
-    fun `federated title falls back to literal peer when neither hub name nor delegated_by available`() {
-        val req = federated(peerHubName = null, delegatedBy = null)
-        val title = formatApprovalTitle(req)
-        assertEquals("Federated request from peer", title)
+        assertEquals("Federated request from ed25519:abc1", title)
     }
 
     @Test

@@ -68,6 +68,11 @@ data class AuditEntryPayload(
     val agent_id: String,
     val tool_name: String,
     val decision: String,
+    val plugin: String? = null,
+    val scope: String? = null,
+    val delegated_by: String? = null,
+    val delegated_to: String? = null,
+    val decision_federated: String? = null,
 )
 
 /**

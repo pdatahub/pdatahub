@@ -22,7 +22,10 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -37,6 +40,9 @@ import com.pdatahub.hub.mcp.Grant
 import com.pdatahub.hub.pairing.QrRenderer
 import com.pdatahub.hub.security.BiometricHelper
 import com.pdatahub.hub.ui.approval.PendingApprovalRequest
+import com.pdatahub.hub.ui.approval.formatApprovalBody
+import com.pdatahub.hub.ui.approval.formatApprovalTitle
+import com.pdatahub.hub.ui.identity.HubIdentitySection
 
 @Composable
 fun HomeScreen(
@@ -50,6 +56,7 @@ fun HomeScreen(
     onLoadGrants: () -> Unit,
     onRevokeGrant: (String) -> Unit,
     onLoadAuditHistory: () -> Unit,
+    onOpenFederation: () -> Unit,
 ) {
     Column(
         modifier = Modifier
@@ -99,10 +106,32 @@ fun HomeScreen(
             onRevoke = onRevokeGrant,
         )
 
+        HubIdentitySection()
+
+        FederationLauncherCard(onOpenFederation = onOpenFederation)
+
         AuditHistoryCard(
             entries = state.auditHistory,
             onLoad = onLoadAuditHistory,
         )
+    }
+}
+
+@Composable
+private fun FederationLauncherCard(onOpenFederation: () -> Unit) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text("Federation", style = MaterialTheme.typography.titleSmall)
+            Text(
+                text = "Manage delegations granted to peer hubs and inspect their state.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            OutlinedButton(onClick = onOpenFederation) { Text("Open federation manager") }
+        }
     }
 }
 
@@ -200,17 +229,60 @@ private fun AuditRow(entry: AuditEntry) {
         "error" -> MaterialTheme.colorScheme.error
         else -> MaterialTheme.colorScheme.onSurfaceVariant
     }
+    val federatedOutcomeColor = when (federatedOutcome(entry)) {
+        AuditOutcome.OK -> MaterialTheme.colorScheme.tertiary
+        AuditOutcome.DENIED, AuditOutcome.ERROR -> MaterialTheme.colorScheme.error
+        AuditOutcome.OTHER -> color
+    }
+    var expanded by remember { mutableStateOf(false) }
     Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
         Text(
             text = "${entry.timestamp} · ${entry.plugin} :: ${entry.tool_name}",
             style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
         )
         Text(
-            text = "${entry.decision} · scope: ${entry.scope} · agent: ${entry.agent_id}" +
-                (entry.error?.let { " · error: $it" } ?: ""),
+            text = formatAuditMainLine(entry),
             style = MaterialTheme.typography.labelSmall,
-            color = color,
+            color = federatedOutcomeColor,
         )
+        if (isFederatedAudit(entry)) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 2.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                OutlinedButton(onClick = { expanded = !expanded }) {
+                    Text(if (expanded) "Hide keys" else "Show keys")
+                }
+                Text(
+                    text = if (entry.delegated_by != null)
+                        "delegated_by ${truncateKey(entry.delegated_by, 12)}…"
+                    else "delegated_to ${truncateKey(entry.delegated_to!!, 12)}…",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            if (expanded) {
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    entry.delegated_by?.let {
+                        Text(
+                            text = "delegated_by: $it",
+                            style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    entry.delegated_to?.let {
+                        Text(
+                            text = "delegated_to: $it",
+                            style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -418,11 +490,15 @@ private fun ApprovalRow(
 
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Text(
-            text = "${request.agentId} → ${request.toolName}",
+            text = formatApprovalTitle(request),
             style = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
+            color = if (request.isFederated)
+                MaterialTheme.colorScheme.tertiary
+            else
+                MaterialTheme.colorScheme.onSurface,
         )
         Text(
-            text = "scope: ${request.scope}",
+            text = formatApprovalBody(request),
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.primary,
         )

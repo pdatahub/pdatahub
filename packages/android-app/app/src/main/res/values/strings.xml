@@ -1,4 +1,38 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">pdatahub</string>
+
+    <!-- Federation v2 — Phase 6 (Android UI) -->
+    <string name="federation_request_title_local">Agent wants to call %1$s</string>
+    <string name="federation_request_title_federated">Federated request from %1$s</string>
+    <string name="federation_request_body_local">Agent `%1$s` wants to call `%2$s` on scope `%3$s`. Approve?</string>
+    <string name="federation_request_body_federated">Agent `%1$s` wants to call `%2$s` on your hub. Approve?</string>
+
+    <string name="hub_identity_section_title">Hub identity</string>
+    <string name="hub_identity_explainer">Public identity of this hub. Share the verify_key with peers to receive delegations.</string>
+    <string name="hub_identity_field_hub_name">Hub name</string>
+    <string name="hub_identity_field_verify_key">Verify key</string>
+    <string name="hub_identity_field_fingerprint">Fingerprint</string>
+    <string name="hub_identity_field_magic_dns">Magic DNS</string>
+    <string name="hub_identity_magic_dns_unset">not detected</string>
+    <string name="hub_identity_copy">Copy</string>
+    <string name="hub_identity_refresh">Refresh</string>
+    <string name="hub_identity_loading">Loading…</string>
+
+    <string name="delegation_screen_title">Federation</string>
+    <string name="delegation_screen_explainer">Manage delegations granted to peer hubs. Revoking takes effect immediately for new calls; in-flight calls complete normally.</string>
+    <string name="delegation_list_empty">No delegations yet. Create one from the CLI: `pdatahub-hub delegate …`</string>
+    <string name="delegation_granted_section">Granted to peers (%1$d)</string>
+    <string name="delegation_received_section">Received from peers (%1$d)</string>
+    <string name="delegation_revoke">Revoke</string>
+    <string name="delegation_revoking">Revoking…</string>
+    <string name="delegation_status_active">active</string>
+    <string name="delegation_status_revoked">revoked</string>
+    <string name="delegation_revoke_confirm_title">Revoke delegation?</string>
+    <string name="delegation_revoke_confirm_body">Delegation %1$s will be marked revoked. New calls against it will fail; in-flight calls complete normally.</string>
+    <string name="delegation_revoke_cancel">Cancel</string>
+
+    <string name="audit_show_keys">Show keys</string>
+    <string name="audit_hide_keys">Hide keys</string>
+    <string name="audit_load_history">Load history</string>
 </resources>
