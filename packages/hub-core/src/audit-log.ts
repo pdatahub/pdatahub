@@ -205,6 +205,50 @@ export class AuditLog {
     }
     return result;
   }
+
+  /**
+   * Phase 7b (Federation v2) — audit retention policy.
+   *
+   * Counts the rows in `audit_log` whose `timestamp < cutoffISO`. Used by
+   * the `pdatahub-hub audit purge --older-than Nd` CLI to show the operator
+   * what would be deleted (preview mode) and to perform the actual delete
+   * (with `--yes`). No background job — manual trigger only.
+   *
+   * Federation multiplies row volume by 2x per federated call (both hubs
+   * log), so the recommended purge cadence is shorter than for a
+   * single-hub install. See docs/federation.md §"Audit retention".
+   *
+   * Returns the count of matching rows. Pure read; no mutations.
+   */
+  countOlderThan(cutoffISO: string): number {
+    const row = this.db
+      .prepare(`SELECT COUNT(*) as n FROM audit_log WHERE timestamp < ?`)
+      .get(cutoffISO) as { n: number };
+    return row.n;
+  }
+
+  /**
+   * Delete every row in `audit_log` whose `timestamp < cutoffISO`.
+   * Parameterized SQL — `cutoffISO` is bound, never interpolated. Returns
+   * the number of rows actually deleted (`changes` from the prepared
+   * statement), so the CLI can print "Deleted N rows" with confidence.
+   *
+   * Federation context (`delegated_by`, `delegated_to`,
+   * `decision_federated`) on surviving rows is untouched — the purge is
+   * column-agnostic and only removes whole rows by timestamp.
+   *
+   * VACUUM is NOT run after the delete. SQLite's incremental vacuum
+   * policy is left at its default; for very large purges (millions of
+   * rows) the user can run `VACUUM` manually. We deliberately don't
+   * auto-vacuum because it locks the DB and would surprise users with
+   * a multi-second pause on every purge.
+   */
+  purgeOlderThan(cutoffISO: string): number {
+    const result = this.db
+      .prepare(`DELETE FROM audit_log WHERE timestamp < ?`)
+      .run(cutoffISO);
+    return result.changes;
+  }
 }
 
 interface AuditRow {

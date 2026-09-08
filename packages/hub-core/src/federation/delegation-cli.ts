@@ -118,6 +118,16 @@ export function parseDuration(input: string, now: number = Date.now()): Date {
   return new Date(now + ms);
 }
 
+/**
+ * Like `parseDuration` but returns `now - duration` instead of `now + duration`.
+ * Used by `pdatahub-hub audit purge --older-than Nd` to compute the cutoff
+ * timestamp: rows whose `timestamp < now - Nd` are eligible for deletion.
+ */
+export function parseDurationAgo(input: string, now: number = Date.now()): Date {
+  const future = parseDuration(input, now);
+  return new Date(2 * now - future.getTime());
+}
+
 /* ─── CLI helpers ──────────────────────────────────────────────────────── */
 
 /**

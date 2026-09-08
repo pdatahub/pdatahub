@@ -264,3 +264,170 @@ Hub watches `--plugins-dir` for new folders on startup.
 | Hub-core restart | Grants expire-checked lazily, audit log persistent, vault re-reads from disk |
 | Tailscale offline | Phone can't reach hub (fallback: adb reverse over USB, or direct LAN IP) |
 | Token vault corruption | BIP-39 backup restore from `~/.pdatahub-backup` |
+
+## Federation v2
+
+Federation v2 lets two hubs share a single plugin tool without sharing OAuth tokens. This section covers the architecture; the user-facing walkthrough lives in [docs/federation.md](./federation.md). The full threat model and design rationale are in [`.omo/plans/federation-v2-design.md`](https://example.invalid/.omo/plans/federation-v2-design.md) (Momus-reviewed).
+
+### Two-hub delegation flow
+
+```
+                  userA's hub                            userB's hub
+                  (data owner)                           (originator)
+                  ────────────                           ─────────────
+[1] `pdatahub-hub delegate`                            [4] `pdatahub-hub accept-delegation`
+    generates Ed25519 blob ─── out-of-band ───> verifies A's signature
+    INSERT INTO delegations                          INSERT INTO peer_delegations
+
+[5] B's MCP calls                                    [5] B's MCP calls
+    federated__userA__listEvents                     federated__userA__listEvents
+            │                                                │
+            │                                                ▼
+            │                                  POST /v1/federation/invoke
+            │                                  looks up peer_delegations
+            │                                  signs body with B's key
+            │                                                │
+            │                                                ▼
+            │   ◀──── HTTP /v1/federation/call ──── POST over WireGuard
+            │          X-Federation-Pubkey
+            │          X-Federation-Signature
+            ▼
+[6] verify sig + clock skew + nonce dedup
+    look up delegation by id
+    fast-fail if /approval-stream empty
+            │
+            ▼
+[7] WebSocket /approval-stream → A's phone
+    A taps Approve (biometric)
+            │
+            ▼
+[8] invoke plugin with A's decrypted token
+            │
+            ▼
+[9] HTTP 200 → B's hub ──→ MCP ──→ AI agent
+```
+
+The HTTP path uses the existing tailnet/WireGuard transport from [docs/relay-mode.md](./relay-mode.md). No new networking layer is introduced.
+
+### Key model
+
+Each hub owns one Ed25519 keypair, generated at `pdatahub-hub init`:
+
+```
+master_key (32 bytes, user-supplied via --master-key)
+  │
+  │ HKDF-SHA256(salt="pdatahub-federation-v1", info="signing-key", L=32)
+  │
+  ▼
+wrapping_key (32 bytes, AES-256) ─── encrypts ───▶ signing_key (32 bytes)
+                                                       │
+                                            ed25519_getPublicKey
+                                                       │
+                                                       ▼
+                                              verify_key (32 bytes)
+                                                       │
+                                                       ▼
+                                     "ed25519:" + base64url(verify_key)
+```
+
+`signing_key` is held in memory only after `HubIdentity.load(db, master_key)` and re-encrypted on disk after every operation that updates it. `verify_key` is published by `GET /v1/identity` (auth: `none`) but the **trust anchor for delegation is the verify_key embedded in the signed blob**, not this endpoint — a hub can lie about `/v1/identity` but cannot forge A's signature.
+
+See `packages/hub-core/src/federation/identity.ts` for the full implementation.
+
+### Per-route auth strategy
+
+Federation needs different auth per route. The strategy is declared declaratively:
+
+```ts
+// packages/hub-core/src/server.ts
+export const routeAuth: RouteAuth[] = [
+  { method: 'GET',  path: '/health',                 auth: 'none' },
+  { method: 'GET',  path: '/v1/identity',            auth: 'none' },
+  { method: 'GET',  path: '/v1/tools',               auth: 'bearer' },
+  { method: 'POST', path: '/v1/tools/:name/call',    auth: 'bearer' },
+  { method: 'POST', path: '/v1/federation/invoke',   auth: 'bearer' },
+  { method: 'POST', path: '/v1/federation/call',     auth: 'ed25519' },
+];
+```
+
+- `none` — public (identity, health).
+- `bearer` — `HUB_API_TOKEN` Bearer check (existing local flow).
+- `ed25519` — `X-Federation-Pubkey` + `X-Federation-Signature` verification over the raw request body. Implemented in `handleFederationCall` (Phase 3).
+
+The default for any unlisted route is `bearer` (fail-closed).
+
+### Hard-fail on missing HUB_API_TOKEN
+
+If the hub binds to a non-loopback interface (anything reachable from the tailnet) without `HUB_API_TOKEN`, it **refuses to start**:
+
+```
+HUB_API_TOKEN must be set when binding to a non-loopback interface.
+For local development only, bind to 127.0.0.1.
+```
+
+This prevents the previous dev-default behavior — "log a warning, allow unauthenticated access" — from silently leaking `/v1/*` on a tailnet. Loopback binds (127.0.0.1, ::1, localhost) preserve the dev convenience.
+
+### Cross-hub audit log semantics
+
+Every audit row gains three new columns in migration v4 (Phase 2b):
+
+| Column | Local call | A receiving federated | B originating federated |
+|--------|-----------|----------------------|------------------------|
+| `user_id` | `'local-user'` | `'local-user'` (A owns the data) | `'local-user'` |
+| `delegated_by` | `NULL` | `B_verify_key` | `NULL` |
+| `delegated_to` | `NULL` | `NULL` | `A_verify_key` |
+| `decision` | `'approved'` / `'denied'` / `'error'` | `'approved'` / `'denied'` / `'error'` | `'approved'` (synonym for federated_ok) |
+| `decision_federated` | `NULL` | `NULL` | `'federated_ok'` / `'federated_denied'` / `'federated_error'` |
+
+The split keeps `decision` semantically stable on each hub — it always means "this hub made the approval decision". `decision_federated` is the bridge between "approved by A" and "the result came back from A" on B's side.
+
+The `user_id` semantics are intentionally **NOT** renamed — `'local-user'` continues to mean "this hub's data" regardless of whether the call originated locally or via federation. Federation context is always carried by `delegated_by` / `delegated_to`. Queries like *"what did userB's hub do?"* filter by `delegated_by`, not `user_id`.
+
+### Federation vs local call distinction
+
+A federated tool appears in `GET /v1/tools` with `federated: true` and a synthetic name `federated__<peer_hub>__<tool>` (double underscore to satisfy MCP's `^[a-zA-Z0-9_-]{1,64}$` constraint):
+
+```json
+{
+  "name": "federated__userA__listEvents",
+  "description": "Federated call to listEvents on userA's google-calendar hub (expires 2026-09-09T07:36:38Z)",
+  "inputSchema": { "type": "object", "properties": { "from": { "type": "string" } } },
+  "scope": "calendar:read",
+  "plugin": "google-calendar",
+  "federated": true,
+  "delegation_id": "7f3e2b1a-9c4d-4a72-b8e1-2a5d8f9c0b3e",
+  "peer_hub_name": "userA",
+  "peer_hub_url": "http://100.79.247.91:8080/",
+  "expires_at": "2026-09-09T07:36:38Z"
+}
+```
+
+mcp-server checks `federated: true` and routes the call to `POST /v1/federation/invoke` on B's hub-core instead of `POST /v1/tools/:name/call`. The descriptor is regenerated on every `GET /v1/tools` call by walking the `peer_delegations` table and skipping revoked/expired rows.
+
+The `ToolDescriptor` type (in `packages/hub-core/src/types.ts`) carries the optional fields `federated`, `delegation_id`, `peer_hub_name`, `peer_hub_url`, and `expires_at`. Local tool descriptors simply omit them — same shape, additive only. mcp-server's type narrowing uses `federated === true` as the discriminator.
+
+### Federation-specific failure modes
+
+Extends the table above:
+
+| Failure | Recovery |
+|---------|----------|
+| A's phone offline | Fast 503 NO_APPROVER_CONNECTED (clients.size === 0 on `/approval-stream`); B sees immediate failure instead of 120s wait |
+| A's hub unreachable | B's `/v1/federation/invoke` returns 502 FEDERATION_UPSTREAM_ERROR; B writes `decision_federated = 'federated_error'` |
+| A revokes mid-session | B's next call returns 403 DELEGATION_REVOKED; B's `peer_delegations.revoked` row is **not** auto-flipped (manual cleanup; v3 broadcasts revocation) |
+| Clock skew > 5 min | B's call returns 401 CLOCK_SKEW on A; sync clocks via NTP/chrony |
+| Replayed `request_id` within 10 min | A returns 409 REPLAY; `federation_nonces` table deduplicates |
+| Spammed approvals (>10 / 60s per (peer, agent)) | A returns 429 RATE_LIMIT before burning approval budget |
+| Compromised B's signing_key | Old delegation calls fail signature verification on A; B must re-accept delegation (rotate) |
+| A rotates signing_key | All existing delegations are invalidated; A must re-issue; B must re-accept |
+| `audit_log` growth | Manual: `pdatahub-hub audit purge --older-than 365d [--yes]` — see [docs/federation.md §Audit retention](./federation.md#audit-retention-phase-7b) |
+
+### Federation-specific invariants
+
+1. **No raw token crosses the hub boundary.** A decrypts its OAuth token from its own vault; B never sees it. The plugin subprocess on A's side receives the token via the SDK's `context.token` injection.
+2. **Per-call approval by default.** A's phone approves every federated call; no auto-grant for trusted peers (v3).
+3. **One tool per delegation.** Each delegation has a single `(plugin, tool, scope)` triple. Bulk "share my whole hub" is explicitly v3+.
+4. **`delegations` and `peer_delegations` are mirrors, not views.** They share the `delegation_id` but live on different hubs. A revoking does not auto-update B.
+5. **`delegated_by` is in the `ensureGrant` match key.** Without it (Phase 2b before Momus C1), a local grant could satisfy a federated call, bypassing the approval flow entirely. Migration v4 fixes this by adding the column and updating `GrantStore.findActive`.
+6. **Audit retention is the user's responsibility.** No background task. `pdatahub-hub audit purge --older-than Nd --yes` is the only mechanism.
+

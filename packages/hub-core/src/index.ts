@@ -43,6 +43,7 @@ import {
   cmdListGranted,
   cmdListReceived,
   cmdRevokeDelegation,
+  parseDurationAgo,
 } from './federation/delegation-cli.js';
 import { logger } from './logger.js';
 import { runMigrations } from './migrations.js';
@@ -128,6 +129,12 @@ function parseSubcommand(argv: string[]):
       delegationId: string;
       dbPath?: string;
       masterKeyHex?: string;
+    }
+  | {
+      kind: 'audit-purge';
+      olderThan: string;
+      yes: boolean;
+      dbPath?: string;
     }
   | { kind: 'help' } {
   const first = findFirstPositional(argv);
@@ -297,13 +304,30 @@ function parseSubcommand(argv: string[]):
       }
       return { kind: 'inspect', inFile: argv[1] };
     }
+    case 'audit': {
+      const aIdx = argv.indexOf('audit');
+      const nextIdx = aIdx + 1 < argv.length ? aIdx + 1 : -1;
+      const sub = nextIdx !== -1 ? argv[nextIdx] : undefined;
+      if (sub !== 'purge') {
+        throw new Error('usage: pdatahub-hub audit purge --older-than <duration> [--yes]');
+      }
+      const oIdx = argv.indexOf('--older-than');
+      const olderThan = oIdx !== -1 && argv[oIdx + 1] ? argv[oIdx + 1] : undefined;
+      if (!olderThan) {
+        throw new Error('missing required flag --older-than (e.g. --older-than 365d)');
+      }
+      const dIdx = argv.indexOf('--db-path');
+      const dbPath = dIdx !== -1 && argv[dIdx + 1] ? argv[dIdx + 1] : undefined;
+      const yes = argv.includes('--yes');
+      return { kind: 'audit-purge', olderThan, yes, dbPath };
+    }
     case 'help':
     case '--help':
     case '-h':
       return { kind: 'help' };
     default:
       throw new Error(
-        `unknown subcommand: ${first} (try: init, identity, delegate, accept-delegation, delegation, backup, restore, inspect, help)`,
+        `unknown subcommand: ${first} (try: init, identity, delegate, accept-delegation, delegation, audit, backup, restore, inspect, help)`,
       );
   }
 }
@@ -325,6 +349,8 @@ USAGE
   pdatahub-hub accept-delegation <blob>     Import a delegation (Phase 4, B side)
   pdatahub-hub delegation list              List received delegations
   pdatahub-hub delegation revoke <id>       Revoke a granted delegation
+  pdatahub-hub audit purge --older-than <d> Delete audit rows older than <d> (Nd|Nh|Nw)
+                                           With --yes: actually delete. Without: preview only.
   pdatahub-hub backup <db> <out>            Encrypt vault DB → backup file
   pdatahub-hub restore <in> <db>            Decrypt backup file → vault DB
   pdatahub-hub inspect <backup>             Show backup metadata (no decrypt)
@@ -671,6 +697,39 @@ async function handleSubcommand(
     // eslint-disable-next-line no-console
     console.error(`No delegation found with id: ${cmd.delegationId}`);
     return 1;
+  }
+
+  if (cmd.kind === 'audit-purge') {
+    const dbPath = cmd.dbPath ?? process.env.HUB_DB_PATH ?? './pdatahub-hub.db';
+    const cutoffDate = parseDurationAgo(cmd.olderThan);
+    const cutoffISO = cutoffDate.toISOString();
+    const db = new Database(dbPath);
+    db.pragma('foreign_keys = ON');
+    try {
+      runMigrations(db);
+      const audit = new AuditLog(db);
+      const matching = audit.countOlderThan(cutoffISO);
+      if (!cmd.yes) {
+        // eslint-disable-next-line no-console
+        console.log(
+          `Preview: ${matching} audit row${matching === 1 ? '' : 's'} older than ${cmd.olderThan} would be deleted.`,
+        );
+        // eslint-disable-next-line no-console
+        console.log(`Run with --yes to actually delete.`);
+        return 0;
+      }
+      const deleted = audit.purgeOlderThan(cutoffISO);
+      const remaining = (db
+        .prepare('SELECT COUNT(*) as n FROM audit_log')
+        .get() as { n: number }).n;
+      // eslint-disable-next-line no-console
+      console.log(`Deleted ${deleted} audit row${deleted === 1 ? '' : 's'} (older than ${cmd.olderThan}).`);
+      // eslint-disable-next-line no-console
+      console.log(`${remaining} remaining audit row${remaining === 1 ? '' : 's'}.`);
+      return 0;
+    } finally {
+      db.close();
+    }
   }
 
   return 0;

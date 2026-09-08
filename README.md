@@ -4,7 +4,11 @@
 
 > Privacy-first personal data platform with per-action approval, time-bounded grants, and auditable AI-agent access.
 
-**Status (2026-09-07):** Full e2e verified — MCP client → hub-core → phone biometric approval → plugin → Google Calendar API → real events, in 4.6 seconds.
+**Status (2026-09-08):** Federation v2 complete across all eight phases — two-hub delegation, signed federation calls, audit retention CLI. See [docs/federation.md](./docs/federation.md) for the walkthrough.
+
+**Federation v2 (shipped 2026-09-08):** Two trusted hubs can now share a single plugin tool with per-call phone approval, while the issuer's OAuth token never crosses the hub boundary. Ed25519-signed delegation blobs travel out-of-band; every federated call is recorded in both hubs' audit logs with `delegated_by` / `delegated_to` populated. See [docs/federation.md](./docs/federation.md) for setup and [docs/architecture.md §Federation v2](./docs/architecture.md#federation-v2) for the architecture.
+
+**Pre-federation e2e (2026-09-07):** Full single-hub path verified — MCP client → hub-core → phone biometric approval → plugin → Google Calendar API → real events, in 4.6 seconds.
 
 ## Architecture
 
@@ -217,10 +221,20 @@ Use the MagicDNS hostname in `hub_core_url` and Google Cloud Console redirect UR
 - ✅ Biometric prompt crash fix (commit 718f2a7)
 - ✅ Heartbeat noise cleanup (commit 3530a99)
 - ✅ Real Google Calendar data e2e via phone approval
-- 🚧 Federation protocol v2 — Hub-to-Hub cross-user delegation
+- ✅ **Federation protocol v2 — Hub-to-Hub cross-user delegation (2026-09-08)**
+  - Phase 0.5 — Migration framework + per-route auth + hard-fail token (commit 0e6fc47)
+  - Phase 1 — Identity foundation (Ed25519 keypair, `/v1/identity`) (commit 0e6fc47)
+  - Phase 2a — Delegation data model + sign/verify + canonical JSON (commit 0e6fc47)
+  - Phase 2b — `user_id` semantics + grant match key fix (commit 0e6fc47)
+  - Phase 3 — Hub-side call path (`/v1/federation/call` + inbound security) (commit 6e2c20f)
+  - Phase 4 — CLI tooling (`delegate`, `accept-delegation`, `list`, `revoke`) (commit 4554ac8)
+  - Phase 5 — Tool descriptors + mcp-server passthrough (`/v1/federation/invoke`) (commit a1cdc5f)
+  - Phase 6 — Android UI (approval payload + HubIdentitySection + DelegationManagementScreen) (commits 778f342, 0895e8e)
+  - Phase 7+7b — User documentation + audit retention CLI (`pdatahub-hub audit purge --older-than Nd`) (2026-09-08)
+  - Phase 8a+8b — Multi-process integration + adversarial tests (`federation-multi-process.test.ts`, `federation-adversarial.test.ts`) — 11 new tests, 321 total passing (2026-09-08)
 - 🚧 pdatahub Cloud v3 — Hosted Hub SaaS
 
-See [`docs/architecture.md`](./docs/architecture.md) for detailed e2e flow, security model, and plugin lifecycle.
+See [`docs/architecture.md`](./docs/architecture.md) for detailed e2e flow, security model, and plugin lifecycle. See [`docs/federation.md`](./docs/federation.md) for the federation walkthrough.
 
 ## License
 
