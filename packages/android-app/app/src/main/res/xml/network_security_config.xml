@@ -6,8 +6,8 @@
   proper certificate validation. Debug builds need cleartext for:
     - 127.0.0.1 (adb reverse from laptop to phone over USB)
     - 192.168.x.x (direct WiFi between phone and laptop on same LAN)
-    - 100.64.0.0/10 (Tailscale CGNAT range, e.g. 100.79.247.91)
-    - *.ts.net (Tailscale MagicDNS, e.g. vladimirmyshkovski.tail36274d.ts.net)
+    - 100.64.0.0/10 (Tailscale CGNAT range)
+    - *.ts.net (Tailscale MagicDNS)
     - 10.0.2.2 (Android emulator → host loopback)
 -->
 <network-security-config>

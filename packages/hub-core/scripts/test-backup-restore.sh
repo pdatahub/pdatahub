@@ -46,7 +46,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-cd /home/vladimirmyshkovski/Programs/AI/pdatahub/packages/hub-core
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+cd "$SCRIPT_DIR/.."
 
 ##############################################
 # Pre-check: hub is running with valid tokens

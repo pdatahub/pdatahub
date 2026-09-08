@@ -99,11 +99,6 @@ export class OAuthFlow {
     const params = new URLSearchParams({
       response_type: 'code',
       client_id: opts.client.client_id,
-      // For Tailscale/cross-network OAuth, the redirect_uri must be reachable
-      // by the user's browser. Default to localhost (works for laptop-only
-      // OAuth flows) but override via HUB_PUBLIC_HOSTNAME env var when the
-      // user's browser is on a different device (e.g., phone connecting via
-      // MagicDNS like vladimirmyshkovski.tail36274d.ts.net:8081).
       redirect_uri: `http://${process.env.HUB_PUBLIC_HOSTNAME ?? '127.0.0.1'}:${callback_port}/callback`,
       scope: opts.oauth.scopes.join(' '),
       state,

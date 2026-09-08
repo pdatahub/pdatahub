@@ -270,18 +270,18 @@ describe('detectMagicDns', () => {
       (): TailscaleStatusResult => ({
         ok: true,
         payload: {
-          MagicDNSSuffix: 'tail36274d.ts.net',
+          MagicDNSSuffix: 'tailabcd1234.ts.net',
           SelfNodeID: 'n1',
           Node: {
             ID: 'n1',
             HostName: 'laptop',
-            MagicDNSName: 'laptop.tail36274d.ts.net',
+            MagicDNSName: 'laptop.tailabcd1234.ts.net',
             OS: 'linux',
           },
         },
       }),
     );
-    expect(detectMagicDns(8080)).toBe('laptop.tail36274d.ts.net:8080');
+    expect(detectMagicDns(8080)).toBe('laptop.tailabcd1234.ts.net:8080');
   });
 
   it('honors custom port parameter', () => {

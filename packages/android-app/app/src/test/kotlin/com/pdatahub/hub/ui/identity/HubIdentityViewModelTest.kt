@@ -39,7 +39,7 @@ class HubIdentityViewModelTest {
             identityResult = IdentityResponse(
                 verify_key = "ed25519:abc_test_key",
                 hub_name = "userA",
-                magic_dns = "userA.tail36274d.ts.net",
+                magic_dns = "userA.example.ts.net",
                 fingerprint = "AB CD EF 01 23 45 67 89",
             )
         )
@@ -49,7 +49,7 @@ class HubIdentityViewModelTest {
         assertTrue("expected Loaded, got $state", state is HubIdentityUiState.Loaded)
         val loaded = state as HubIdentityUiState.Loaded
         assertEquals("userA", loaded.identity.hub_name)
-        assertEquals("userA.tail36274d.ts.net", loaded.identity.magic_dns)
+        assertEquals("userA.example.ts.net", loaded.identity.magic_dns)
         assertEquals("AB CD EF 01 23 45 67 89", loaded.identity.fingerprint)
     }
 
@@ -95,7 +95,7 @@ class HubIdentityViewModelTest {
             IdentityResponse(
                 verify_key = "ed25519:recovered",
                 hub_name = "userA",
-                magic_dns = "userA.tail36274d.ts.net",
+                magic_dns = "userA.example.ts.net",
                 fingerprint = "FF FF FF FF FF FF FF FF",
             )
         )
