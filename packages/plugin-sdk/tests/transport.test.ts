@@ -267,4 +267,60 @@ describe('StdioTransport', () => {
     expect(parsed.method).toBe('progress');
     expect(parsed.id).toBeUndefined();
   });
+
+  it('enforces requestTimeoutMs and returns a -32000 error', async () => {
+    const { stdin, stdout, writes } = makeStreams();
+    const transport = new StdioTransport('test', {
+      stdin,
+      stdout,
+      requestTimeoutMs: 50,
+    });
+
+    // Handler that never resolves within the timeout
+    const promise = transport.listen(async () => new Promise<never>(() => {}));
+
+    stdin.push('{"jsonrpc":"2.0","id":42,"method":"slow"}\n');
+
+    await vi.waitFor(() => {
+      expect(writes).toHaveLength(1);
+    });
+
+    const response = JSON.parse(writes[0]!.trim()) as {
+      jsonrpc: string;
+      id: number;
+      error: { code: number; message: string };
+    };
+    expect(response.id).toBe(42);
+    expect(response.error.code).toBe(-32000);
+    expect(response.error.message).toMatch(/timed out/);
+
+    stdin.push(null);
+    await promise;
+  });
+
+  it('does not enforce a timeout when requestTimeoutMs is not set', async () => {
+    const { stdin, stdout, writes } = makeStreams();
+    const transport = new StdioTransport('test', { stdin, stdout });
+
+    let resolveHandler!: (v: unknown) => void;
+    const handler = vi.fn(() => new Promise<unknown>((resolve) => { resolveHandler = resolve; }));
+    const promise = transport.listen(handler);
+
+    stdin.push('{"jsonrpc":"2.0","id":1,"method":"pending"}\n');
+    await vi.waitFor(() => {
+      expect(handler).toHaveBeenCalled();
+    });
+    // Wait longer than a typical request timeout would be — proves no timeout was set
+    await new Promise((r) => setTimeout(r, 100));
+    expect(writes).toHaveLength(0);
+
+    // Now resolve — response should be written
+    resolveHandler({ jsonrpc: '2.0', id: 1, result: 'late' });
+    await vi.waitFor(() => {
+      expect(writes).toHaveLength(1);
+    });
+
+    stdin.push(null);
+    await promise;
+  });
 });

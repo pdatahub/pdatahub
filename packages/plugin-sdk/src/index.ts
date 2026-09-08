@@ -7,6 +7,7 @@
  * ```
  */
 export { Plugin } from './plugin.js';
+export type { PluginLifecycle } from './plugin.js';
 export { Tool, OAuth, getToolsForClass, getOAuthForClass } from './decorators.js';
 export { HttpClient } from './http-client.js';
 export type { HttpClientOptions, HttpRequestOptions, HttpResponse } from './http-client.js';
@@ -14,6 +15,11 @@ export { Logger } from './logger.js';
 export { StdioTransport } from './transport.js';
 export type { StdioTransportOptions, RequestHandler } from './transport.js';
 export { buildManifest } from './manifest.js';
+
+// v2 NEW: typed error hierarchy + JSON Schema validation.
+// Plugin authors opt in by importing from the package root.
+export * from './errors.js';
+export * from './validation.js';
 
 export type {
   ToolDefinition,
@@ -24,6 +30,11 @@ export type {
   JsonRpcResponse,
   JsonRpcError,
   PluginManifest,
+  PluginCapability,
+  ProtocolVersion,
+  LifeCycleHook,
+  LifeCycleParams,
+  LifeCycleResult,
   ToolCallParams,
   ToolCallResult,
   InitializeParams,

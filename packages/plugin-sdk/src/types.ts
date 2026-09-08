@@ -93,6 +93,68 @@ export interface JsonRpcError {
 }
 
 /**
+ * Protocol version constants for the plugin ↔ Hub wire format.
+ *
+ *   - `1` — v0.1.x SDK (current baseline). No typed errors, no schema
+ *     validation, no lifecycle hooks. Hub falls back to string-error
+ *     handling.
+ *   - `2` — v0.2.x SDK (this release). Typed errors, JSON Schema input
+ *     validation, lifecycle hooks, health checks.
+ *
+ * Plugins opt in by setting `protocolVersion = 2` on the subclass. The
+ * default (when not set) is `1` for backward compatibility — existing
+ * plugins keep working unchanged.
+ */
+export type ProtocolVersion = 1 | 2;
+
+/**
+ * Plugin capability flags reported in the manifest.
+ *
+ * Each flag indicates the plugin uses a v2 feature so the Hub can
+ * negotiate behavior. Capabilities are advisory — the Hub may enable
+ * a feature even without the flag (e.g., always parse JSON-RPC error.data
+ * as a PluginErrorPayload), but the flag is a clear signal.
+ */
+export type PluginCapability =
+  | 'typed-errors'      // Plugin throws PluginError subclasses
+  | 'schema-validation' // Plugin uses inputSchema in @Tool
+  | 'lifecycle-hooks'   // Plugin implements lifecycle methods
+  | 'health-check';     // Plugin implements health()
+
+/**
+ * Names of lifecycle hooks the Hub may invoke over the `plugin.lifecycle`
+ * JSON-RPC method. The transport does not know about lifecycle itself;
+ * `Plugin.dispatch()` routes `plugin.lifecycle` requests to the matching
+ * method on the plugin instance.
+ */
+export type LifeCycleHook =
+  | 'install'
+  | 'uninstall'
+  | 'activate'
+  | 'deactivate'
+  | 'health';
+
+/**
+ * Params for a `plugin.lifecycle` JSON-RPC request.
+ */
+export interface LifeCycleParams {
+  hook: LifeCycleHook;
+}
+
+/**
+ * Result of a `plugin.lifecycle` JSON-RPC request.
+ *
+ * For `health` hook, `result` carries the plugin's health status.
+ * For other hooks, `result` is `null` (or omitted) on success.
+ */
+export interface LifeCycleResult {
+  /** Present only for the `health` hook. */
+  status?: 'healthy' | 'degraded' | 'unhealthy';
+  /** Human-readable message accompanying the status (especially for non-healthy). */
+  message?: string;
+}
+
+/**
  * Plugin manifest: returned to the Hub on `initialize`.
  *
  * The manifest tells the Hub what the plugin is, what version, and what tools
@@ -103,8 +165,19 @@ export interface PluginManifest {
   name: string;
   version: string;
   description?: string;
+  /**
+   * SDK protocol version. `1` for v0.1.x (default), `2` for v0.2.x.
+   * Required to be present in the manifest when the plugin opts in to v2;
+   * the manifest builder defaults to `1` for backward compatibility.
+   */
+  protocolVersion: ProtocolVersion;
   tools: ToolDefinition[];
   oauth?: OAuthConfig;
+  /**
+   * Optional list of v2 capabilities the plugin uses. Advisory — the Hub
+   * may warn on unknown capabilities but does not reject.
+   */
+  capabilities?: PluginCapability[];
 }
 
 /**

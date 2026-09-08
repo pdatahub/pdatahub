@@ -97,6 +97,54 @@ describe('buildManifest', () => {
     const manifest = buildManifest(instance);
     expect(manifest.tools).toEqual([]);
   });
+
+  it('defaults protocolVersion to 1 for v1 plugins', () => {
+    class V1 extends Plugin {
+      name = 'v1';
+      version = '0.1.0';
+    }
+    const instance = new V1();
+    const manifest = buildManifest(instance);
+    expect(manifest.protocolVersion).toBe(1);
+    expect(manifest.capabilities).toBeUndefined();
+  });
+
+  it('emits protocolVersion 2 and capabilities when plugin opts in', () => {
+    class V2 extends Plugin {
+      name = 'v2';
+      version = '0.2.0';
+      override protocolVersion = 2 as const;
+      override async health(): Promise<{ status: 'healthy' }> {
+        return { status: 'healthy' };
+      }
+    }
+    const instance = new V2();
+    const manifest = buildManifest(instance);
+    expect(manifest.protocolVersion).toBe(2);
+    expect(manifest.capabilities).toEqual(
+      expect.arrayContaining(['typed-errors', 'lifecycle-hooks', 'health-check']),
+    );
+  });
+
+  it('detects schema-validation capability when a @Tool declares inputSchema', () => {
+    class WithSchema extends Plugin {
+      name = 'schemavalid';
+      version = '0.2.0';
+      override protocolVersion = 2 as const;
+
+      @Tool({
+        scope: 'do.thing',
+        description: 'Do thing',
+        inputSchema: { type: 'object', required: ['x'] },
+      })
+      async doThing(): Promise<unknown> {
+        return null;
+      }
+    }
+    const instance = new WithSchema();
+    const manifest = buildManifest(instance);
+    expect(manifest.capabilities).toContain('schema-validation');
+  });
 });
 
 describe('Plugin.dispatch', () => {

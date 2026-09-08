@@ -36,6 +36,22 @@ export interface StdioTransportOptions {
   stdin?: NodeJS.ReadableStream;
   /** Override stdout (defaults to process.stdout). Useful for testing. */
   stdout?: NodeJS.WritableStream;
+  /**
+   * Default per-request timeout in milliseconds.
+   *
+   * When set, every JSON-RPC request the handler processes is wrapped in
+   * a timeout. If the handler doesn't resolve within `requestTimeoutMs`,
+   * the transport sends a JSON-RPC error response with code `-32000` and
+   * a "Request timed out" message, then continues to the next request.
+   *
+   * Default: no timeout (backward compat).
+   *
+   * v2 plugins using `plugin.lifecycle` enforce their own per-hook
+   * timeouts (30s for install/uninstall/activate/deactivate, 5s for
+   * health) inside `Plugin.dispatch()` — this option is a fallback for
+   * ad-hoc handlers or for transports created outside the Plugin class.
+   */
+  requestTimeoutMs?: number;
 }
 
 /**
@@ -116,6 +132,35 @@ export class StdioTransport {
     target.write(JSON.stringify(notification) + '\n');
   }
 
+  /**
+   * Race a promise against a timeout. If the timeout fires first, rejects
+   * with a tagged Error (`__pdhubTimeout: true`) so the catch handler can
+   * distinguish timeouts from genuine handler errors and emit the
+   * appropriate JSON-RPC error code (-32000 for timeout).
+   *
+   * The underlying promise is left to settle on its own — we don't cancel
+   * it (that would require AbortController plumbing through the handler).
+   */
+  private withTimeout<T>(p: Promise<T>, ms: number, method: string): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        const err = new Error(`Request "${method}" timed out after ${ms}ms`);
+        (err as Error & { __pdhubTimeout?: boolean }).__pdhubTimeout = true;
+        reject(err);
+      }, ms);
+      p.then(
+        (v) => {
+          clearTimeout(timer);
+          resolve(v);
+        },
+        (err) => {
+          clearTimeout(timer);
+          reject(err);
+        },
+      );
+    });
+  }
+
   private async processLine(
     line: string,
     handler: RequestHandler,
@@ -160,7 +205,9 @@ export class StdioTransport {
 
     // Request: must respond with matching `id`.
     try {
-      const result = await handler(req);
+      const result = this.options.requestTimeoutMs
+        ? await this.withTimeout(Promise.resolve(handler(req)), this.options.requestTimeoutMs, req.method)
+        : await handler(req);
       if (result !== null) {
         this.sendResponse(result, stdout);
       } else {
@@ -174,13 +221,14 @@ export class StdioTransport {
       }
     } catch (err) {
       const e = err as Error;
+      const isTimeout = (err as Error & { __pdhubTimeout?: boolean }).__pdhubTimeout === true;
       this.sendResponse(
         {
           jsonrpc: '2.0',
           id: req.id,
           error: {
-            code: -32603,
-            message: e.message || 'Internal error',
+            code: isTimeout ? -32000 : -32603,
+            message: e.message || (isTimeout ? 'Request timed out' : 'Internal error'),
             data: process.env['PDHUB_DEBUG'] === '1' ? e.stack : undefined,
           },
         },
