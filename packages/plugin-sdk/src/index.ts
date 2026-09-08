@@ -20,6 +20,7 @@ export { buildManifest } from './manifest.js';
 // Plugin authors opt in by importing from the package root.
 export * from './errors.js';
 export * from './validation.js';
+export * from './testing.js';
 
 export type {
   ToolDefinition,

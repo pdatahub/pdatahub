@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { HttpClient, type RequestFn } from '../src/http-client.js';
 import { Logger } from '../src/logger.js';
+import { NotFoundError } from '../src/errors.js';
 
 /**
  * Build a mock request function that captures calls and returns a canned
@@ -148,8 +149,9 @@ describe('HttpClient', () => {
   it('passes through status code', async () => {
     const reqFn = mockRequest({ statusCode: 404, body: '{"error":"not found"}' });
     const client = new HttpClient({}, { requestFn: reqFn });
-    const response = await client.get('https://api.example.com/missing');
-    expect(response.status).toBe(404);
+    await expect(
+      client.get('https://api.example.com/missing'),
+    ).rejects.toBeInstanceOf(NotFoundError);
   });
 
   it('supports PUT, PATCH, DELETE methods', async () => {
