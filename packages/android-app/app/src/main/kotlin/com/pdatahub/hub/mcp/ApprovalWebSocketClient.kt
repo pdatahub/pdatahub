@@ -45,6 +45,9 @@ sealed class ApprovalStreamEvent {
         val scope: String,
         val justification: String? = null,
         val created_at: String,
+        val delegated_by: String? = null,
+        val peer_hub_name: String? = null,
+        val peer_agent_id: String? = null,
     ) : ApprovalStreamEvent()
 
     @Serializable

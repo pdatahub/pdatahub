@@ -34,11 +34,13 @@ class ApprovalNotificationManager @Inject constructor(
                     is ApprovalStreamEvent.ApprovalRequest -> {
                         _pendingRequests.value = _pendingRequests.value + PendingApprovalRequest(
                             requestId = event.request_id,
-                            agentId = event.agent_id,
+                            agentId = event.peer_agent_id ?: event.agent_id,
                             toolName = event.tool_name,
                             scope = event.scope,
                             justification = event.justification,
                             createdAt = event.created_at,
+                            delegatedBy = event.delegated_by,
+                            peerHubName = event.peer_hub_name,
                         )
                     }
                     is ApprovalStreamEvent.GrantRevoked -> {
@@ -79,4 +81,24 @@ data class PendingApprovalRequest(
     val scope: String,
     val justification: String?,
     val createdAt: String,
-)
+    val delegatedBy: String? = null,
+    val peerHubName: String? = null,
+) {
+    val isFederated: Boolean get() = delegatedBy != null
+}
+
+internal fun formatApprovalTitle(request: PendingApprovalRequest): String =
+    if (request.isFederated) {
+        "Federated request from ${request.peerHubName ?: request.delegatedBy?.take(12) ?: "peer"}"
+    } else {
+        "Agent wants to call ${request.toolName}"
+    }
+
+internal fun formatApprovalBody(request: PendingApprovalRequest): String =
+    if (request.isFederated) {
+        "Agent `${request.agentId}` wants to call `${request.toolName}` " +
+            "on your hub. Approve?"
+    } else {
+        "Agent `${request.agentId}` wants to call `${request.toolName}` " +
+            "on scope `${request.scope}`. Approve?"
+    }
