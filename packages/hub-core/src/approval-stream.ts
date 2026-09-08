@@ -14,7 +14,7 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import type { Server as HttpServer } from 'node:http';
 import { randomUUID } from 'node:crypto';
-import type { ApprovalStreamMessage } from './types.js';
+import type { ApprovalStreamMessage, PluginReauthNotification } from './types.js';
 import { logger } from './logger.js';
 
 export interface PendingApproval {
@@ -148,6 +148,34 @@ export class ApprovalStream {
       grant_id,
     };
     this.broadcast(message);
+  }
+
+  /**
+   * Plugin SDK v2 — push a `plugin_reauth` notification to Android UI
+   * clients. Triggered by `handleCallTool` when the plugin throws
+   * `AuthExpiredError` (and only that error class — `AuthError` and
+   * `ScopeError` still surface as 4xx so the user can manually re-auth
+   * via the OAuth flow).
+   *
+   * The notification is filtered to Android phones only (`userAgent ===
+   * 'android-hub'`) — CLI clients do not handle it. Existing API
+   * clients that don't know the type still receive it (and ignore it),
+   * matching the file's documented forward-compat policy for unknown
+   * message types.
+   *
+   * `notif.reason` is `'AUTH_EXPIRED' | 'AUTH_FAILED'` — the UI uses it
+   * to pick the right UX flow ("tap to refresh" vs "re-authorize").
+   */
+  broadcastPluginReauth(notif: PluginReauthNotification): void {
+    const message: ApprovalStreamMessage = notif;
+    const json = JSON.stringify(message);
+    for (const client of this.clients) {
+      if (client.readyState !== WebSocket.OPEN) continue;
+      const userAgent = (client as WebSocket & { userAgent?: string }).userAgent;
+      if (userAgent === 'android-hub') {
+        client.send(json);
+      }
+    }
   }
 
   /**

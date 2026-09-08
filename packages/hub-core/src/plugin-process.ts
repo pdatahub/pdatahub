@@ -21,7 +21,13 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, realpathSync } from 'node:fs';
 import { resolve } from 'node:path';
 import readline from 'node:readline';
-import type { OAuthConfig, PluginManifest } from '@pdatahub/plugin-sdk';
+import {
+  type OAuthConfig,
+  PluginError as SdkPluginError,
+  type PluginManifest,
+  type LifeCycleHook,
+  type LifeCycleResult,
+} from '@pdatahub/plugin-sdk';
 import type {
   PluginOAuthConfig,
   PluginProcessInfo,
@@ -207,6 +213,64 @@ export class PluginProcess {
       this.child.kill('SIGKILL');
     }
     this.cleanup();
+  }
+
+  /**
+   * Plugin SDK v2 — invoke a lifecycle hook on the plugin subprocess
+   * via the `plugin.lifecycle` JSON-RPC method. Returns the plugin's
+   * result on success; throws a PluginError on timeout / plugin error.
+   *
+   * Default timeouts follow the SDK's contract: 30s for
+   * install/uninstall/activate/deactivate, 5s for health. The caller
+   * may override (e.g. tests use shorter timeouts).
+   *
+   * The underlying JSON-RPC request already has its own 30s timeout via
+   * `request<T>()`, so this method's timeout acts as an outer guard
+   * layered on top — if the caller passes a longer timeout, the inner
+   * 30s still fires first (PluginError code `TIMEOUT`).
+   *
+   * On plugin-side error, the JSON-RPC `error.data` carries the
+   * PluginError payload (`errorCode`, `retryable`, `details`); we
+   * reconstruct a real PluginError so callers get the same shape as
+   * SDK errors thrown synchronously.
+   */
+  async invokeLifecycleHook(
+    hook: LifeCycleHook,
+    timeoutMs?: number,
+    params?: Record<string, unknown>,
+  ): Promise<LifeCycleResult | null> {
+    const effectiveTimeout =
+      timeoutMs ?? (hook === 'health' ? 5000 : 30000);
+    // Cap at the JSON-RPC transport's internal timeout (30s) so the
+    // transport-level timeout fires first when the caller asks for
+    // something longer. The SDK's Plugin.dispatch() also enforces 30s
+    // for non-health hooks.
+    const transportTimeout = Math.min(effectiveTimeout, 30_000);
+
+    let result: unknown;
+    try {
+      result = await this.request<LifeCycleResult | null | undefined>(
+        'plugin.lifecycle',
+        { hook, ...(params ?? {}) },
+        transportTimeout,
+      );
+    } catch (err) {
+      const msg = (err as Error).message ?? '';
+      if (msg.includes('timeout')) {
+        throw new SdkPluginError(
+          'TIMEOUT',
+          `Lifecycle hook "${hook}" timed out after ${transportTimeout}ms`,
+          true,
+          { hook, timeoutMs: transportTimeout },
+        );
+      }
+      throw err;
+    }
+
+    if (hook === 'health') {
+      return (result ?? { status: 'healthy' }) as LifeCycleResult;
+    }
+    return null;
   }
 
   getInfo(): PluginProcessInfo {

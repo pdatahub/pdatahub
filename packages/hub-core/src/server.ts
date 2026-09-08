@@ -32,6 +32,7 @@ import type { TokenVault } from './token-vault.js';
 import type { OAuthFlow, PluginClientConfig } from './oauth-flow.js';
 import type { ApprovalStream } from './approval-stream.js';
 import type { HubConfig } from './config.js';
+import { PluginError } from '@pdatahub/plugin-sdk';
 import type {
   AuditEntry,
   CallToolRequest,
@@ -39,6 +40,7 @@ import type {
   HubErrorResponse,
   ListToolsResponse,
   PluginProcessInfo,
+  PluginReauthNotification,
   ToolDescriptor,
 } from './types.js';
 import { HubIdentity } from './federation/identity.js';
@@ -120,6 +122,96 @@ function pathToRegex(pattern: string): RegExp {
 }
 
 const TOOL_GRANT_TTL_MS = 60 * 60 * 1000; // 1 hour default
+
+/**
+ * Plugin SDK v2 — map a `PluginError.code` to the HTTP status code the
+ * Hub returns to the MCP client / caller. Stable mapping (the SDK
+ * documents the codes; we don't second-guess):
+ *
+ *   AUTH_EXPIRED     → 401  (token needs refresh)
+ *   AUTH_FAILED      → 403  (grant revoked, bad creds)
+ *   SCOPE_MISSING    → 403  (OAuth grant missing scope)
+ *   VALIDATION_FAILED→ 400  (bad input shape)
+ *   NOT_FOUND        → 404  (upstream 404 / missing local resource)
+ *   RATE_LIMITED     → 502  (caller retries with backoff)
+ *   TIMEOUT          → 502  (caller retries)
+ *   NETWORK_ERROR    → 502  (caller retries)
+ *   UPSTREAM_ERROR   → 502  (caller retries)
+ *   default         → 500  (unknown PluginError — preserve generic 500)
+ *
+ * Exported for testing (`tests/error-routing.test.ts`).
+ */
+export function mapErrorToHttpStatus(err: PluginError): number {
+  switch (err.code) {
+    case 'AUTH_EXPIRED':
+      return 401;
+    case 'AUTH_FAILED':
+    case 'SCOPE_MISSING':
+      return 403;
+    case 'VALIDATION_FAILED':
+      return 400;
+    case 'NOT_FOUND':
+      return 404;
+    case 'RATE_LIMITED':
+    case 'TIMEOUT':
+    case 'NETWORK_ERROR':
+    case 'UPSTREAM_ERROR':
+      return 502;
+    default:
+      return 500;
+  }
+}
+
+/**
+ * Plugin SDK v2 — serialize a PluginError into the JSON shape the
+ * MCP client receives. Preserves `retryable` + `details` so the AI
+ * agent can decide whether to back off and re-call.
+ *
+ * Exported for testing.
+ */
+export function mapErrorToMcpError(err: PluginError): {
+  code: string;
+  message: string;
+  retryable: boolean;
+  details?: Record<string, unknown>;
+} {
+  const out: {
+    code: string;
+    message: string;
+    retryable: boolean;
+    details?: Record<string, unknown>;
+  } = {
+    code: err.code,
+    message: err.message,
+    retryable: err.retryable,
+  };
+  if (err.details !== undefined) {
+    out.details = err.details;
+  }
+  return out;
+}
+
+/**
+ * Plugin SDK v2 — narrow a PluginError to the re-auth notification the
+ * Hub broadcasts to Android UI clients. Returns `null` for non-auth
+ * errors (only `AuthExpiredError` triggers a phone notification today;
+ * `AuthError` and `ScopeError` are surfaced as 4xx so the user manually
+ * re-authorizes via the OAuth flow).
+ *
+ * Exported for testing.
+ */
+export function buildPluginReauthNotification(
+  err: PluginError,
+  pluginName: string,
+): PluginReauthNotification | null {
+  if (err.code !== 'AUTH_EXPIRED') return null;
+  return {
+    type: 'plugin_reauth',
+    plugin: pluginName,
+    reason: 'AUTH_EXPIRED',
+    message: err.message,
+  };
+}
 
 export interface HubServerOptions {
   config: HubConfig;
@@ -577,6 +669,47 @@ export class HubServer {
       };
       this.sendJson(res, 200, response);
     } catch (err) {
+      // Plugin SDK v2 — when the plugin throws a typed PluginError, route
+      // by `code` to the right HTTP status and audit shape. AUTH_EXPIRED
+      // also broadcasts a phone notification so the user can re-authorize.
+      // Non-PluginError failures keep the existing 500 path (no behavior
+      // change for v1 plugins).
+      if (err instanceof PluginError) {
+        const httpStatus = mapErrorToHttpStatus(err);
+        const mcpError = mapErrorToMcpError(err);
+        const reauthNotif = buildPluginReauthNotification(err, grant.plugin);
+
+        const auditEntry = this.opts.audit.append({
+          agent_id: agentId,
+          user_id: this.defaultUserId,
+          tool_name: toolName,
+          plugin: grant.plugin,
+          scope: grant.scope,
+          justification,
+          decision: 'error',
+          grant_id: grant.grant_id,
+          duration_ms: Date.now() - startedAt,
+          error: err.message,
+          delegated_by: null,
+          delegated_to: null,
+          decision_federated: null,
+          error_class: err.name,
+          error_code: err.code,
+        });
+        this.opts.approval.broadcastAudit(auditEntry);
+
+        if (reauthNotif) {
+          this.opts.approval.broadcastPluginReauth(reauthNotif);
+        }
+
+        this.sendJson(res, httpStatus, {
+          error: err.message,
+          code: mcpError.code,
+          plugin_error: mcpError,
+        });
+        return;
+      }
+
       const auditEntry = this.opts.audit.append({
         agent_id: agentId,
         user_id: this.defaultUserId,

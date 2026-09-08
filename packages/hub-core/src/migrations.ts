@@ -60,8 +60,15 @@
  *                   federated call. The hub checks `seen_at > now - 600s`
  *                   at query time (lazy sweep, no background task). Table
  *                   size ≈ max-concurrent-active-requests × 1.
- *   - v6+: future federation work (multi-hop delegation, peer_signature
- *         rotation, audit retention policy — see Phase 7b in the design).
+ *   - v6 (Plugin SDK v2 integration): adds `error_class` + `error_code`
+ *                   columns to `audit_log` so the hub can record the typed
+ *                   PluginError that caused a call to fail. The columns are
+ *                   NULL by default — only populated when the plugin throws
+ *                   a PluginError subclass (the SDK's 9 typed error classes
+ *                   each set `name` → `error_class` and `code` →
+ *                   `error_code`). Existing federation v2 columns
+ *                   (`delegated_by`, `delegated_to`, `decision_federated`)
+ *                   are NOT modified — v6 only ADDS.
  */
 import type Database from 'better-sqlite3';
 import { logger } from './logger.js';
@@ -280,6 +287,21 @@ const migrations: Migration[] = [
       // Phase 3 — replay dedup table for `/v1/federation/call`. See
       // `federation/nonces.ts` (NonceStore) for read/write semantics.
       db.exec(federationNoncesSchema);
+    },
+  },
+  {
+    version: 6,
+    up: (db) => {
+      // Plugin SDK v2 (Day 5 of plugin-sdk-v2-design.md) — captures the
+      // typed PluginError class + machine-readable code on every error
+      // audit row. The Hub's error router (`server.handleCallTool`) sets
+      // these from `err.name` and `err.code` when the plugin throws a
+      // PluginError subclass; non-PluginError failures leave the columns
+      // NULL. Federation v2 columns are untouched — v6 is purely additive.
+      db.exec(`
+        ALTER TABLE audit_log ADD COLUMN error_class TEXT;
+        ALTER TABLE audit_log ADD COLUMN error_code TEXT;
+      `);
     },
   },
 ];

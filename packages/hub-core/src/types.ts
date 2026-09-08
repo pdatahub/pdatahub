@@ -165,6 +165,20 @@ export interface AuditEntry {
    * 'federated_error'). Null on local calls and on the receiving hub.
    */
   decision_federated: string | null;
+  /**
+   * Plugin SDK v2 — name of the PluginError subclass that caused this
+   * call to fail (e.g. "AuthExpiredError", "ValidationError"). Set by
+   * `server.handleCallTool` when the plugin throws a PluginError; null
+   * for non-PluginError failures and for successful calls.
+   */
+  error_class: string | null;
+  /**
+   * Plugin SDK v2 — machine-readable error code from
+   * `PluginError.code` (e.g. "AUTH_EXPIRED", "VALIDATION_FAILED",
+   * "NETWORK_ERROR"). Set together with `error_class`. Used by
+   * `AuditLog.getByErrorCode(code)` for diagnostics.
+   */
+  error_code: string | null;
 }
 
 /* ─── Internal: token vault ─────────────────────────────────────────────── */
@@ -239,6 +253,31 @@ export interface PluginOAuthConfig {
 
 /* ─── Internal: approval stream (WebSocket to Android UI) ───────────────── */
 
+/**
+ * Plugin SDK v2 — WebSocket notification pushed to Android UI clients
+ * when a plugin throws `AuthExpiredError` and the user needs to
+ * re-authorize. Phone-only filter (`userAgent === 'android-hub'` in
+ * `ApprovalStream.broadcastPluginReauth`) — CLI clients ignore it.
+ *
+ * `reason` is stable so the UI can drive different UX flows:
+ *   - `AUTH_EXPIRED` — token expired; show "Tap to refresh" CTA
+ *   - `AUTH_FAILED`  — grant revoked or other hard failure; show
+ *                      "Re-authorize required" dialog
+ *
+ * Existing Android clients ignore unknown `type` values (the stream
+ * handler only routes `approval_decided` and `pong`), so the new
+ * message type is forward-compatible.
+ */
+export interface PluginReauthNotification {
+  type: 'plugin_reauth';
+  /** Plugin that needs re-authorization. */
+  plugin: string;
+  /** Stable reason code from the error class. */
+  reason: 'AUTH_EXPIRED' | 'AUTH_FAILED';
+  /** Human-readable message from the PluginError. */
+  message: string;
+}
+
 export type ApprovalStreamMessage =
   | {
       type: 'approval_request';
@@ -281,6 +320,12 @@ export type ApprovalStreamMessage =
   | {
       type: 'grant_revoked';
       grant_id: string;
+    }
+  | {
+      type: 'plugin_reauth';
+      plugin: string;
+      reason: 'AUTH_EXPIRED' | 'AUTH_FAILED';
+      message: string;
     }
   | {
       type: 'pong';

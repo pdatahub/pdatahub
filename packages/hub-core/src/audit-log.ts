@@ -57,6 +57,18 @@ export interface AuditAppendInput {
    * NULL on local calls and on the receiving hub.
    */
   decision_federated?: string | null;
+  /**
+   * Plugin SDK v2 — name of the PluginError subclass (e.g.
+   * "AuthExpiredError"). Set by the error router when the plugin
+   * throws a PluginError; null for non-PluginError failures and
+   * successful calls.
+   */
+  error_class?: string | null;
+  /**
+   * Plugin SDK v2 — machine-readable error code from `PluginError.code`
+   * (e.g. "AUTH_EXPIRED"). Set together with `error_class`.
+   */
+  error_code?: string | null;
 }
 
 export interface AuditQueryOptions {
@@ -92,7 +104,9 @@ export class AuditLog {
         error TEXT,
         delegated_by TEXT,
         delegated_to TEXT,
-        decision_federated TEXT
+        decision_federated TEXT,
+        error_class TEXT,
+        error_code TEXT
       );
       CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_log(timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_audit_agent ON audit_log(agent_id);
@@ -112,13 +126,16 @@ export class AuditLog {
       delegated_by: input.delegated_by ?? null,
       delegated_to: input.delegated_to ?? null,
       decision_federated: input.decision_federated ?? null,
+      error_class: input.error_class ?? null,
+      error_code: input.error_code ?? null,
       ...input,
     };
     this.db.prepare(`
       INSERT INTO audit_log (id, timestamp, agent_id, user_id, tool_name, plugin, scope,
                              justification, decision, grant_id, duration_ms, error,
-                             delegated_by, delegated_to, decision_federated)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                             delegated_by, delegated_to, decision_federated,
+                             error_class, error_code)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       entry.id,
       entry.timestamp,
@@ -135,6 +152,8 @@ export class AuditLog {
       entry.delegated_by ?? null,
       entry.delegated_to ?? null,
       entry.decision_federated ?? null,
+      entry.error_class ?? null,
+      entry.error_code ?? null,
     );
     return entry;
   }
@@ -171,7 +190,8 @@ export class AuditLog {
     const sql = `
       SELECT id, timestamp, agent_id, user_id, tool_name, plugin, scope,
              justification, decision, grant_id, duration_ms, error,
-             delegated_by, delegated_to, decision_federated
+             delegated_by, delegated_to, decision_federated,
+             error_class, error_code
       FROM audit_log
       ${where.length > 0 ? 'WHERE ' + where.join(' AND ') : ''}
       ORDER BY timestamp DESC
@@ -179,6 +199,34 @@ export class AuditLog {
     `;
     params.push(limit);
     const rows = this.db.prepare(sql).all(...params) as AuditRow[];
+    return rows.map(rowToEntry);
+  }
+
+  /**
+   * Plugin SDK v2 — return audit entries whose `error_code` column matches
+   * the given stable code (e.g. "AUTH_EXPIRED", "VALIDATION_FAILED").
+   * Newest first, capped at `limit` (default 100). Diagnostic helper
+   * for the Hub operator / CLI: "show me every AUTH_EXPIRED event in
+   * the last 30 days for the google-calendar plugin".
+   *
+   * Returns `[]` when no rows match (including when `code` is empty /
+   * unknown — there is no implicit "all errors" wildcard, the caller
+   * can pass `'%'` if they want it).
+   */
+  getByErrorCode(code: string, limit?: number): AuditEntry[] {
+    const cappedLimit = limit ?? 100;
+    const rows = this.db
+      .prepare(
+        `SELECT id, timestamp, agent_id, user_id, tool_name, plugin, scope,
+                justification, decision, grant_id, duration_ms, error,
+                delegated_by, delegated_to, decision_federated,
+                error_class, error_code
+         FROM audit_log
+         WHERE error_code = ?
+         ORDER BY timestamp DESC
+         LIMIT ?`,
+      )
+      .all(code, cappedLimit) as AuditRow[];
     return rows.map(rowToEntry);
   }
 
@@ -267,6 +315,8 @@ interface AuditRow {
   delegated_by: string | null;
   delegated_to: string | null;
   decision_federated: string | null;
+  error_class: string | null;
+  error_code: string | null;
 }
 
 function rowToEntry(row: AuditRow): AuditEntry {
@@ -286,5 +336,7 @@ function rowToEntry(row: AuditRow): AuditEntry {
     delegated_by: row.delegated_by,
     delegated_to: row.delegated_to,
     decision_federated: row.decision_federated,
+    error_class: row.error_class,
+    error_code: row.error_code,
   };
 }

@@ -49,11 +49,11 @@ function tableNames(): string[] {
 }
 
 describe('runMigrations', () => {
-  it('sets user_version to 5 on a fresh DB (Phase 0.5 + 1 + 2a + 2b + 3 applied)', () => {
+  it('sets user_version to 6 on a fresh DB (Phase 0.5 + 1 + 2a + 2b + 3 + Plugin SDK v2 applied)', () => {
     expect(readUserVersion()).toBe(0);
     const result = runMigrations(db);
-    expect(result).toBe(5);
-    expect(readUserVersion()).toBe(5);
+    expect(result).toBe(6);
+    expect(readUserVersion()).toBe(6);
   });
 
   it('creates audit_log, grants, token_vault tables on a fresh DB', () => {
@@ -87,7 +87,7 @@ describe('runMigrations', () => {
   it('is idempotent — second run does not throw or change version', () => {
     runMigrations(db);
     expect(() => runMigrations(db)).not.toThrow();
-    expect(readUserVersion()).toBe(5);
+    expect(readUserVersion()).toBe(6);
   });
 
   it('idempotent run does not duplicate tables', () => {
@@ -129,15 +129,15 @@ describe('runMigrations', () => {
       .prepare("SELECT id FROM audit_log WHERE id = 'pre-existing'")
       .get();
     expect(row).toBeDefined();
-    expect(readUserVersion()).toBe(5);
+    expect(readUserVersion()).toBe(6);
   });
 });
 
 describe('runMigrations — Phase 1 (federation identity)', () => {
   it('sets user_version to 5 on a fresh DB (after v2)', () => {
     const result = runMigrations(db);
-    expect(result).toBe(5);
-    expect(readUserVersion()).toBe(5);
+    expect(result).toBe(6);
+    expect(readUserVersion()).toBe(6);
   });
 
   it('creates federation_keys table with all expected columns', () => {
@@ -174,9 +174,9 @@ describe('runMigrations — Phase 1 (federation identity)', () => {
     ).toThrow(/CHECK/);
   });
 
-  it('runs v1 → v2 → v3 → v4 → v5 in order', () => {
+  it('runs v1 → v2 → v3 → v4 → v5 → v6 in order', () => {
     runMigrations(db);
-    expect(readUserVersion()).toBe(5);
+    expect(readUserVersion()).toBe(6);
     const names = tableNames();
     expect(names).toContain('audit_log');
     expect(names).toContain('grants');
@@ -186,10 +186,10 @@ describe('runMigrations — Phase 1 (federation identity)', () => {
     expect(names).toContain('peer_delegations');
   });
 
-  it('idempotent — second run is a no-op (version stays 5, no duplicate tables)', () => {
+  it('idempotent — second run is a no-op (version stays 6, no duplicate tables)', () => {
     runMigrations(db);
     expect(() => runMigrations(db)).not.toThrow();
-    expect(readUserVersion()).toBe(5);
+    expect(readUserVersion()).toBe(6);
     const count = db
       .prepare(
         "SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name='federation_keys'",
@@ -198,7 +198,7 @@ describe('runMigrations — Phase 1 (federation identity)', () => {
     expect(count.n).toBe(1);
   });
 
-  it('preserves v1 data when migrating forward to v5', () => {
+  it('preserves v1 data when migrating forward to v6', () => {
     db.exec(`
       CREATE TABLE audit_log (
         id TEXT PRIMARY KEY, timestamp TEXT NOT NULL, agent_id TEXT NOT NULL,
@@ -220,10 +220,10 @@ describe('runMigrations — Phase 1 (federation identity)', () => {
       .prepare("SELECT id FROM audit_log WHERE id = 'pre-existing'")
       .get();
     expect(row).toBeDefined();
-    expect(readUserVersion()).toBe(5);
+    expect(readUserVersion()).toBe(6);
   });
 
-  it('upgrades a v1 DB (user_version=1) to v5', () => {
+  it('upgrades a v1 DB (user_version=1) to v6', () => {
     db.exec(`
       CREATE TABLE audit_log (id TEXT PRIMARY KEY, timestamp TEXT NOT NULL);
       CREATE TABLE grants (grant_id TEXT PRIMARY KEY, tool_name TEXT NOT NULL);
@@ -233,7 +233,7 @@ describe('runMigrations — Phase 1 (federation identity)', () => {
 
     runMigrations(db);
 
-    expect(readUserVersion()).toBe(5);
+    expect(readUserVersion()).toBe(6);
     const names = tableNames();
     expect(names).toContain('federation_keys');
     expect(names).toContain('delegations');
@@ -246,7 +246,7 @@ describe('runMigrations — Phase 1 (federation identity)', () => {
     expect(grantCols.map((c) => c.name)).toEqual(expect.arrayContaining(['delegated_by']));
   });
 
-  it('upgrades a v2 DB (user_version=2) to v5', () => {
+  it('upgrades a v2 DB (user_version=2) to v6', () => {
     // Simulates a hub that initialized federation identity (Phase 1) before
     // Phase 2a + 2b landed — should pick up the new delegation tables +
     // federation-context columns.
@@ -274,7 +274,7 @@ describe('runMigrations — Phase 1 (federation identity)', () => {
 
     runMigrations(db);
 
-    expect(readUserVersion()).toBe(5);
+    expect(readUserVersion()).toBe(6);
     const names = tableNames();
     expect(names).toContain('delegations');
     expect(names).toContain('peer_delegations');
@@ -283,7 +283,7 @@ describe('runMigrations — Phase 1 (federation identity)', () => {
     expect(names).toContain('federation_keys');
   });
 
-  it('upgrades a v2 DB (with federation_keys) to v5', () => {
+  it('upgrades a v2 DB (with federation_keys) to v6', () => {
     db.exec(`
       CREATE TABLE audit_log (
         id TEXT PRIMARY KEY, timestamp TEXT NOT NULL, agent_id TEXT NOT NULL,
@@ -308,7 +308,7 @@ describe('runMigrations — Phase 1 (federation identity)', () => {
 
     runMigrations(db);
 
-    expect(readUserVersion()).toBe(5);
+    expect(readUserVersion()).toBe(6);
     const names = tableNames();
     expect(names).toContain('delegations');
     expect(names).toContain('peer_delegations');
