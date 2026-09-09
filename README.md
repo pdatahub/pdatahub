@@ -7,6 +7,7 @@
 [![TypeScript](https://img.shields.io/badge/typescript-5.x-3178C6)](https://www.typescriptlang.org)
 [![Tests](https://img.shields.io/badge/tests-697%2F697-brightgreen)](./CHANGELOG.md)
 [![Self-hosted](https://img.shields.io/badge/self--hosted-yes-purple)](./docs/self-hosting.md)
+[![Website](https://img.shields.io/badge/website-pdatahub.github.io-blue)](https://pdatahub.github.io/pdatahub-site/)
 
 > Privacy-first personal data platform with per-action approval, time-bounded grants, auditable AI-agent access, and Federation v2 (cross-user delegation).
 
