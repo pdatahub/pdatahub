@@ -3,6 +3,18 @@
 All notable changes to pdatahub are documented here. Dates are in `YYYY-MM-DD` format. Versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+## [0.2.1] — 2026-09-09
+
+### Changed
+
+- **Plugin SDK**: `httpClient` field reverted from `protected` to `public`. v1 plugins accessed the HTTP client via `this.http` / `this.httpClient` directly; making it `protected` blocked plugin authors from writing helpers outside the subclass (e.g. utility methods in separate files). No behavior change for subclasses, which already had access.
+- **`PluginLifecycle` interface**: now documents v1 hooks (`onStart`, `onShutdown`, `onToolResult`) alongside v2 hooks (`onInstall`, `onUninstall`, `onActivate`, `onDeactivate`, `health`). Subclass overrides remain optional for all hooks.
+
+### Compatibility
+
+- Wire format unchanged. All v0.2.0 plugins work without code changes.
+- TypeScript: `httpClient` is now `public` instead of `protected`. Subclass access unchanged. External test mocks can now read `plugin.httpClient` without casting.
+
 ## [0.3.0] — 2026-09-09
 
 ### Added
