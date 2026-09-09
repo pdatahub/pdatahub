@@ -1067,7 +1067,7 @@ async function main(): Promise<void> {
   // Initialize stores
   const grants = new GrantStore(db);
   const audit = new AuditLog(db);
-  const tokens = new TokenVault(db, config.masterKey);
+  const tokens = new TokenVault(db, config.masterKey, audit);
 
   // Phase 3 + 4 — wire federation stores (delegations + nonces). Without
   // these, /v1/federation/call returns 503 FEDERATION_NOT_INITIALIZED
@@ -1078,6 +1078,15 @@ async function main(): Promise<void> {
   // Initialize OAuth + approval stream
   const oauth = new OAuthFlow(tokens, config.oauthCallbackPort);
   const approval = new ApprovalStream({ timeoutMs: 60_000 });
+
+  // T-PERSISTENT-001 mitigation #2 — wire the WebSocket broadcaster
+  // onto the audit log so every vault-decryption event (written by
+  // TokenVault.getAccessToken) gets pushed live to the Android UI
+  // over `/approval-stream`. ApprovalStream satisfies the structural
+  // VaultAccessBroadcaster interface via its broadcastVaultAccess
+  // method. Wiring happens BEFORE server.start() so the first
+  // incoming MCP call already has a broadcaster attached.
+  audit.setBroadcaster(approval);
 
   // Plugin registry
   const registry = new PluginRegistry();

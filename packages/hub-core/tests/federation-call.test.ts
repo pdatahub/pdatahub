@@ -192,6 +192,15 @@ async function setupHarness(opts: {
         ...(opts.callToolImpl ? { callToolImpl: opts.callToolImpl } : {}),
       }),
     );
+    // T-PERSISTENT-001 mitigation #2 — the server's call path now calls
+    // `TokenVault.getAccessToken()` which throws on not_found. Pre-seed
+    // a token so the plugin actually runs and the federation tests can
+    // exercise the cross-hub audit + approval flow.
+    tokens.store({
+      plugin: 'google-calendar',
+      access_token: 'fake-federation-token',
+      scope: 'calendar:read',
+    });
   }
 
   // A's hub identity — used to issue the delegation.

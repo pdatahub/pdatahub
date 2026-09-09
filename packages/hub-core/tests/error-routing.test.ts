@@ -197,6 +197,7 @@ describe('HubServer.handleCallTool — PluginError routing', () => {
   let approval: ApprovalStream;
   let audit: AuditLog;
   let grants: GrantStore;
+  let tokens: TokenVault;
   let port: number;
   let registry: FakeRegistry;
   const originalToken = process.env.HUB_API_TOKEN;
@@ -219,7 +220,7 @@ describe('HubServer.handleCallTool — PluginError routing', () => {
     ]);
     grants = new GrantStore(db);
     audit = new AuditLog(db);
-    const tokens = new TokenVault(db, config.masterKey);
+    tokens = new TokenVault(db, config.masterKey);
     const oauth = new OAuthFlow(tokens);
     approval = new ApprovalStream({ timeoutMs: 500 });
     registry = new FakeRegistry();
@@ -266,6 +267,16 @@ describe('HubServer.handleCallTool — PluginError routing', () => {
   ): Promise<{ status: number; body: Record<string, unknown> }> {
     registry.add(plugin);
     pregrant(toolName, plugin.getInfo().name);
+    // T-PERSISTENT-001 mitigation #2 — store a token so
+    // `TokenVault.getAccessToken()` succeeds inside the server's
+    // call path (it now throws on not_found; the error-routing
+    // tests need the plugin to be CALLED so it can throw its
+    // typed PluginError).
+    tokens.store({
+      plugin: plugin.getInfo().name,
+      access_token: 'fake-token-for-routing-test',
+      scope: plugin.getInfo().tools.find((t) => t.name === toolName)?.scope ?? 'plugin:read',
+    });
     const res = await undiciRequest(
       `http://127.0.0.1:${port}/v1/tools/${encodeURIComponent(toolName)}/call`,
       {
@@ -479,8 +490,16 @@ describe('HubServer.handleCallTool — PluginError routing', () => {
     );
     expect(status).toBe(500);
     expect(body['code']).toBe('PLUGIN_ERROR');
-    expect(audit.query()).toHaveLength(1);
-    expect(audit.query()[0]!.error_class).toBeNull();
-    expect(audit.query()[0]!.error_code).toBeNull();
+    // T-PERSISTENT-001 mitigation #2 — there are now TWO audit rows:
+    //   1. The vault_access row written by TokenVault.getAccessToken()
+    //      (non-blocking via setImmediate).
+    //   2. The plugin error row written by handleCallTool's catch block.
+    // Filter to the plugin error row by `decision != 'vault_access'`
+    // before asserting on the typed error fields.
+    const all = audit.query();
+    const pluginRow = all.find((r) => r.decision !== 'vault_access');
+    expect(pluginRow).toBeDefined();
+    expect(pluginRow!.error_class).toBeNull();
+    expect(pluginRow!.error_code).toBeNull();
   });
 });

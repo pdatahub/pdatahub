@@ -7,12 +7,40 @@
  *
  * Plugin NEVER sees raw OAuth token — Hub injects via SDK's httpClient.
  * This module returns plaintext ONLY to internal Hub callers (PluginProcess).
+ *
+ * T-PERSISTENT-001 mitigation #2 — every call to `getAccessToken()`
+ * (the auditable path used by server.ts → PluginProcess) writes one
+ * `decision = 'vault_access'` audit row via `AuditLog.recordVaultAccess()`
+ * (non-blocking: deferred to `setImmediate`). The audit store is
+ * optional — older callers that don't wire one still work; tests can
+ * pass a custom `AuditLog` instance. When the audit store is missing,
+ * the vault read proceeds silently with no audit (used by the CLI
+ * tools and the unit tests that don't exercise the security model).
  */
 
 import type Database from 'better-sqlite3';
 import { createCipheriv, createDecipheriv, hkdfSync, randomBytes } from 'node:crypto';
 import { request } from 'undici';
 import { logger } from './logger.js';
+import type { AuditLog } from './audit-log.js';
+
+/**
+ * T-PERSISTENT-001 mitigation #2 — actor context passed to
+ * `TokenVault.getAccessToken()`. Mirrors the fields the Hub already
+ * carries on every MCP request (`agent_id`, `tool_name`, `request_id`)
+ * so the audit row can be joined with the originating tool-call audit
+ * row by `request_id`.
+ *
+ * `actor_type` defaults to `'system'` and `actor_id` defaults to
+ * `'local-user'` so old call sites that don't pass an opts object keep
+ * working (the audit row is still written, just with a generic actor).
+ */
+export interface VaultAccessOpts {
+  actor_type?: 'agent' | 'user' | 'system';
+  actor_id?: string;
+  tool_name?: string;
+  request_id?: string;
+}
 
 interface RefreshResponse {
   access_token: string;
@@ -46,6 +74,16 @@ export class TokenVault {
   constructor(
     private readonly db: Database.Database,
     masterKey: Buffer,
+    /**
+     * T-PERSISTENT-001 mitigation #2 — optional audit log for vault
+     * access telemetry. When wired, every `getAccessToken()` call
+     * writes a `decision = 'vault_access'` row (non-blocking via
+     * `setImmediate`). Older callers that don't pass one still work
+     * — the vault read proceeds silently. The audit log is optional
+     * to keep the constructor backward-compatible with existing
+     * tests that don't exercise the security model.
+     */
+    private readonly auditLog?: AuditLog,
   ) {
     if (masterKey.length !== 32) {
       throw new Error('master key must be 32 bytes (AES-256)');
@@ -162,6 +200,13 @@ export class TokenVault {
   /**
    * Retrieve and decrypt tokens for a plugin. Returns null if not found.
    * INTERNAL USE ONLY — PluginProcess retrieves on behalf of plugin.
+   *
+   * For the auditable read path (T-PERSISTENT-001 mitigation #2), use
+   * `getAccessToken(plugin, opts)` — it writes a `vault_access` audit
+   * row before returning. `get()` stays available for internal callers
+   * that should NOT generate audit rows (e.g. `refreshAccessToken`,
+   * which would double-count every refresh as both a vault read AND
+   * the audit row the refresh itself triggers).
    */
   get(plugin: string): DecryptedToken | null {
     const row = this.db.prepare(`
@@ -189,6 +234,102 @@ export class TokenVault {
       expires_at: row.expires_at,
       scope: row.scope,
     };
+  }
+
+  /**
+   * T-PERSISTENT-001 mitigation #2 — auditable read path. Returns the
+   * decrypted token for a plugin (throws if no token stored or if AES
+   * GCM tag verification fails) AND writes one `decision = 'vault_access'`
+   * audit row capturing WHO triggered the read, for WHAT tool, under
+   * WHICH request_id.
+   *
+   * Audit write is non-blocking (deferred to `setImmediate` inside
+   * `AuditLog.recordVaultAccess`) — vault decryption does not wait on
+   * SQLite or the WebSocket broadcast. If the audit log is not wired
+   * (older callers, CLI tools), the vault read proceeds silently.
+   *
+   * Failure modes:
+   *   - no token stored     → audit row `result = 'not_found'`, throws
+   *                           `Error('No token stored for plugin: ...')`.
+   *   - AES GCM tag fails   → audit row `result = 'error'` with the
+   *                           decrypt error message, throws.
+   *   - decrypt succeeds    → audit row `result = 'success'`, returns
+   *                           the `DecryptedToken`.
+   *
+   * `opts.actor_type` defaults to `'system'` and `opts.actor_id`
+   * defaults to `'local-user'` so old call sites that don't pass an
+   * opts object still produce a useful audit row.
+   */
+  getAccessToken(plugin: string, opts?: VaultAccessOpts): DecryptedToken {
+    const actorType = opts?.actor_type ?? 'system';
+    const actorId = opts?.actor_id ?? 'local-user';
+    const toolName = opts?.tool_name;
+    const requestId = opts?.request_id;
+
+    try {
+      const token = this.get(plugin);
+      if (!token) {
+        this.safeRecordVaultAccess({
+          plugin,
+          actor_type: actorType,
+          actor_id: actorId,
+          tool_name: toolName ?? null,
+          request_id: requestId ?? null,
+          result: 'not_found',
+        });
+        throw new Error(`No token stored for plugin: ${plugin}`);
+      }
+      this.safeRecordVaultAccess({
+        plugin,
+        actor_type: actorType,
+        actor_id: actorId,
+        tool_name: toolName ?? null,
+        request_id: requestId ?? null,
+        result: 'success',
+      });
+      return token;
+    } catch (err) {
+      const wasNotFound = err instanceof Error && err.message.startsWith('No token stored for plugin:');
+      if (!wasNotFound) {
+        this.safeRecordVaultAccess({
+          plugin,
+          actor_type: actorType,
+          actor_id: actorId,
+          tool_name: toolName ?? null,
+          request_id: requestId ?? null,
+          result: 'error',
+          error_message: (err as Error).message,
+        });
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * T-PERSISTENT-001 mitigation #2 — fire-and-forget wrapper around
+   * `AuditLog.recordVaultAccess`. Wraps in try/catch so an audit log
+   * failure (e.g. SQLite locked, broadcaster threw) never breaks the
+   * vault decryption path that called us. Errors are logged via the
+   * shared `logger`.
+   */
+  private safeRecordVaultAccess(input: {
+    plugin: string;
+    actor_type: 'agent' | 'user' | 'system';
+    actor_id: string;
+    tool_name: string | null;
+    request_id: string | null;
+    result: 'success' | 'denied' | 'not_found' | 'error';
+    error_message?: string;
+  }): void {
+    if (!this.auditLog) return;
+    try {
+      this.auditLog.recordVaultAccess(input);
+    } catch (err) {
+      logger.warn('vault audit record threw synchronously', {
+        plugin: input.plugin,
+        error: (err as Error).message,
+      });
+    }
   }
 
   /**

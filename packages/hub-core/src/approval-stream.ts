@@ -14,7 +14,11 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import type { Server as HttpServer } from 'node:http';
 import { randomUUID } from 'node:crypto';
-import type { ApprovalStreamMessage, PluginReauthNotification } from './types.js';
+import type {
+  ApprovalStreamMessage,
+  PluginReauthNotification,
+  VaultAccessUpdate,
+} from './types.js';
 import { logger } from './logger.js';
 
 export interface PendingApproval {
@@ -167,6 +171,30 @@ export class ApprovalStream {
    * to pick the right UX flow ("tap to refresh" vs "re-authorize").
    */
   broadcastPluginReauth(notif: PluginReauthNotification): void {
+    const message: ApprovalStreamMessage = notif;
+    const json = JSON.stringify(message);
+    for (const client of this.clients) {
+      if (client.readyState !== WebSocket.OPEN) continue;
+      const userAgent = (client as WebSocket & { userAgent?: string }).userAgent;
+      if (userAgent === 'android-hub') {
+        client.send(json);
+      }
+    }
+  }
+
+  /**
+   * T-PERSISTENT-001 mitigation #2 — push a `vault_access` notification
+   * to Android UI clients. Triggered by `AuditLog.recordVaultAccess()`
+   * every time `TokenVault.getAccessToken()` succeeds, fails, or finds
+   * no token. Lets the user see "<plugin> token decrypted at <time> by
+   * <actor> for <tool>" in real time so they can investigate unexpected
+   * access within seconds.
+   *
+   * Same Android-only filter as `broadcastPluginReauth` — CLI clients
+   * ignore unknown `type` values per the stream's documented
+   * forward-compat policy.
+   */
+  broadcastVaultAccess(notif: VaultAccessUpdate): void {
     const message: ApprovalStreamMessage = notif;
     const json = JSON.stringify(message);
     for (const client of this.clients) {

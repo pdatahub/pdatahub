@@ -69,6 +69,24 @@
  *                   `error_code`). Existing federation v2 columns
  *                   (`delegated_by`, `delegated_to`, `decision_federated`)
  *                   are NOT modified — v6 only ADDS.
+ *
+ *   - v7 (T-PERSISTENT-001 mitigation #2 — audit log of every vault
+ *                   decryption): adds three actor-context columns to
+ *                   `audit_log` so the Hub can record WHO triggered each
+ *                   token decryption, with WHAT tool, under WHICH request:
+ *                     - `actor_type` TEXT  — 'agent' | 'user' | 'system'
+ *                     - `actor_id`   TEXT  — agent identifier / user / 'local-user'
+ *                     - `request_id` TEXT  — correlation ID from the
+ *                       originating `/v1/tools/:name/call` so the Android
+ *                       UI can join the vault-decryption row with its
+ *                       tool-call audit row.
+ *                   All three are NULLable and purely additive. The new
+ *                   `TokenVault.getAccessToken(plugin, opts)` call path
+ *                   populates them on a `decision = 'vault_access'` row
+ *                   that broadcasts to Android over `/approval-stream`
+ *                   for live monitoring (closes the second attack vector
+ *                   for T-PERSISTENT-001 — detects post-extraction re-use
+ *                   of the vault via hub-core itself).
  */
 import type Database from 'better-sqlite3';
 import { logger } from './logger.js';
@@ -301,6 +319,27 @@ const migrations: Migration[] = [
       db.exec(`
         ALTER TABLE audit_log ADD COLUMN error_class TEXT;
         ALTER TABLE audit_log ADD COLUMN error_code TEXT;
+      `);
+    },
+  },
+  {
+    version: 7,
+    up: (db) => {
+      // T-PERSISTENT-001 mitigation #2 — audit log of every vault
+      // decryption. Three actor-context columns on `audit_log` so the
+      // Hub records WHO triggered each getAccessToken() call, with WHAT
+      // tool, under WHICH request_id. NULLable + additive — existing
+      // rows keep their (NULL) values, existing audit writers don't
+      // need to change. The new TokenVault.getAccessToken(plugin, opts)
+      // call path populates them via AuditLog.recordVaultAccess(), which
+      // also broadcasts a `vault_access` WebSocket message to Android
+      // clients (`ApprovalStream.broadcastVaultAccess`) for live
+      // monitoring. Closes Path B of T-PERSISTENT-001 (attacker uses
+      // stolen keyring via hub-core instead of calling Google directly).
+      db.exec(`
+        ALTER TABLE audit_log ADD COLUMN actor_type TEXT;
+        ALTER TABLE audit_log ADD COLUMN actor_id TEXT;
+        ALTER TABLE audit_log ADD COLUMN request_id TEXT;
       `);
     },
   },

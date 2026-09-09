@@ -639,7 +639,12 @@ export class HubServer {
       }
     }
 
-    const tokens = this.opts.tokens.get(grant.plugin);
+    const tokens = this.opts.tokens.getAccessToken(grant.plugin, {
+      actor_type: 'agent',
+      actor_id: agentId,
+      tool_name: toolName,
+      request_id: requestId,
+    });
 
     // Call plugin
     try {
@@ -1114,7 +1119,12 @@ export class HubServer {
         }
       }
     }
-    const tokens = this.opts.tokens.get(pluginInfo.name);
+    const tokens = this.opts.tokens.getAccessToken(pluginInfo.name, {
+      actor_type: 'agent',
+      actor_id: agentId,
+      tool_name: toolName,
+      request_id: requestId,
+    });
 
     // 11. Approval flow with 120s budget + federated metadata.
     let decision: import('./approval-stream.js').ApprovalDecision;

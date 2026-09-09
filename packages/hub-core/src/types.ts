@@ -122,7 +122,15 @@ export type AuditDecision =
   | 'auto_allowed'
   | 'expired'
   | 'revoked'
-  | 'error';
+  | 'error'
+  /**
+   * T-PERSISTENT-001 mitigation #2 — every `TokenVault.getAccessToken()`
+   * call writes one of these. The `error` field on the row carries the
+   * failure message when the decryption or vault lookup failed; absence
+   * of `error` means success. `actor_type` / `actor_id` / `request_id`
+   * tell the Android UI who triggered the decrypt and for which call.
+   */
+  | 'vault_access';
 
 export interface AuditEntry {
   /** UUID v4. */
@@ -179,6 +187,51 @@ export interface AuditEntry {
    * `AuditLog.getByErrorCode(code)` for diagnostics.
    */
   error_code: string | null;
+  /**
+   * T-PERSISTENT-001 mitigation #2 — which entity triggered a
+   * `vault_access` row. `'agent'` for an MCP request from an AI agent,
+   * `'user'` for direct hub-initiated OAuth flows, `'system'` for
+   * internal callers (e.g. proactive token refresh). Always paired
+   * with `actor_id`. NULL on non-vault rows.
+   */
+  actor_type: string | null;
+  /**
+   * T-PERSISTENT-001 mitigation #2 — identifier of the actor that
+   * triggered the vault access. For `actor_type = 'agent'` this is the
+   * agent_id from the MCP request; for `'user'` it's the user id; for
+   * `'system'` it's the calling subsystem name (e.g. 'oauth-flow',
+   * 'proactive-refresh'). NULL on non-vault rows.
+   */
+  actor_id: string | null;
+  /**
+   * T-PERSISTENT-001 mitigation #2 — correlation ID from the
+   * originating `/v1/tools/:name/call` request so the Android UI can
+   * join a vault-decryption row with its matching tool-call audit row
+   * in the live stream. NULL on non-vault rows and on system-initiated
+   * refreshes that don't carry a request id.
+   */
+  request_id: string | null;
+}
+
+/**
+ * T-PERSISTENT-001 mitigation #2 — WebSocket frame pushed to Android UI
+ * clients whenever a token is decrypted out of the vault. Distinct from
+ * the existing `audit_update` frame so the phone can render a dedicated
+ * "vault access" notification (different visual weight than a normal
+ * tool-call audit row).
+ *
+ * `entry.decision === 'vault_access'`, `entry.actor_type` /
+ * `entry.actor_id` / `entry.request_id` carry the actor context.
+ * `entry.error` is set when the decryption or vault lookup failed.
+ *
+ * Phone-only filter (`userAgent === 'android-hub'` in
+ * `ApprovalStream.broadcastVaultAccess`) — CLI clients do not handle
+ * it. Existing clients ignore unknown `type` values per the stream's
+ * documented forward-compat policy.
+ */
+export interface VaultAccessUpdate {
+  type: 'vault_access';
+  entry: AuditEntry;
 }
 
 /* ─── Internal: token vault ─────────────────────────────────────────────── */
@@ -326,6 +379,14 @@ export type ApprovalStreamMessage =
       plugin: string;
       reason: 'AUTH_EXPIRED' | 'AUTH_FAILED';
       message: string;
+    }
+  | {
+      /**
+       * T-PERSISTENT-001 mitigation #2 — live vault-decryption telemetry.
+       * See `VaultAccessUpdate` above.
+       */
+      type: 'vault_access';
+      entry: AuditEntry;
     }
   | {
       type: 'pong';

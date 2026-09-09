@@ -39,7 +39,7 @@ describe('audit_log migration v6 — Plugin SDK v2', () => {
   it('fresh DB applies v6 + adds error_class + error_code columns', () => {
     expect(readUserVersion()).toBe(0);
     runMigrations(db);
-    expect(readUserVersion()).toBe(6);
+    expect(readUserVersion()).toBe(7);
 
     const cols = db.prepare('PRAGMA table_info(audit_log)').all() as Array<{ name: string }>;
     const names = cols.map((c) => c.name);
@@ -47,7 +47,7 @@ describe('audit_log migration v6 — Plugin SDK v2', () => {
     expect(names).toContain('error_code');
   });
 
-  it('existing v5 DB upgrades to v6 + gains the error columns', () => {
+  it('existing v5 DB upgrades to v7 + gains the error columns (and v7 actor-context columns)', () => {
     // Simulate a hub on the pre-v6 schema (Phase 3, before Plugin SDK v2
     // landed). The audit_log columns are the v1-v5 set.
     db.exec(`
@@ -94,9 +94,12 @@ describe('audit_log migration v6 — Plugin SDK v2', () => {
 
     runMigrations(db);
 
-    expect(readUserVersion()).toBe(6);
+    expect(readUserVersion()).toBe(7);
     const cols = db.prepare('PRAGMA table_info(audit_log)').all() as Array<{ name: string }>;
     const names = cols.map((c) => c.name);
+    expect(names).toContain('actor_type');
+    expect(names).toContain('actor_id');
+    expect(names).toContain('request_id');
     expect(names).toContain('error_class');
     expect(names).toContain('error_code');
     // Federation v2 columns preserved.
@@ -183,7 +186,7 @@ describe('audit_log migration v6 — Plugin SDK v2', () => {
     expect(audit.getByErrorCode('NEVER_HAPPENED')).toEqual([]);
   });
 
-  it('audit entry with error fields persists all 16 columns', () => {
+  it('audit entry with error fields persists all 19 columns', () => {
     runMigrations(db);
     const audit = new AuditLog(db);
     const entry = audit.append({
@@ -202,13 +205,17 @@ describe('audit_log migration v6 — Plugin SDK v2', () => {
       decision_federated: 'federated_error',
       error_class: 'NetworkError',
       error_code: 'NETWORK_ERROR',
+      actor_type: 'agent',
+      actor_id: 'a1',
+      request_id: 'r-1',
     });
     const row = db
       .prepare(
         `SELECT id, agent_id, user_id, tool_name, plugin, scope, justification,
                 decision, grant_id, duration_ms, error,
                 delegated_by, delegated_to, decision_federated,
-                error_class, error_code
+                error_class, error_code,
+                actor_type, actor_id, request_id
          FROM audit_log WHERE id = ?`,
       )
       .get(entry.id) as Record<string, unknown>;
@@ -218,7 +225,8 @@ describe('audit_log migration v6 — Plugin SDK v2', () => {
     expect(row['decision_federated']).toBe('federated_error');
     expect(row['error_class']).toBe('NetworkError');
     expect(row['error_code']).toBe('NETWORK_ERROR');
-    // 16 columns verified by checking the explicit list.
-    expect(Object.keys(row)).toHaveLength(16);
+    // 19 columns verified by checking the explicit list (16 original +
+    // actor_type + actor_id + request_id from migration v7).
+    expect(Object.keys(row)).toHaveLength(19);
   });
 });

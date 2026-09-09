@@ -144,6 +144,13 @@ async function startHubSide(opts: {
       ...(opts.callToolImpl ? { callToolImpl: opts.callToolImpl } : {}),
     }),
   );
+  // T-PERSISTENT-001 mitigation #2 — store a token so
+  // `TokenVault.getAccessToken()` succeeds in the server's call path.
+  tokens.store({
+    plugin: 'google-calendar',
+    access_token: 'fake-federation-token',
+    scope: 'calendar:read',
+  });
 
   const hubIdentity = HubIdentity.generate(opts.hubName, MASTER_KEY);
   hubIdentity.save(db);

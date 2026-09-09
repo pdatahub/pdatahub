@@ -24,11 +24,61 @@
  * Phase 2b only changes the schema and the input shape; the call paths
  * still write NULLs for local calls. Phase 3 (federation_nonces + the
  * /v1/federation/call endpoint) populates the columns for real.
+ *
+ * T-PERSISTENT-001 mitigation #2 — three more actor-context columns on
+ * `audit_log`, populated by `recordVaultAccess()` for every
+ * `TokenVault.getAccessToken()` call (whether successful or not):
+ *   - `actor_type` (TEXT) — 'agent' | 'user' | 'system'
+ *   - `actor_id`   (TEXT) — agent_id / user id / 'local-user'
+ *   - `request_id` (TEXT) — correlation ID from the originating MCP call
+ *
+ * The corresponding audit row uses `decision = 'vault_access'` and is
+ * broadcast live to the Android UI via `ApprovalStream.broadcastVaultAccess`
+ * (wired through `setBroadcaster`). Writing + broadcasting happens in a
+ * `setImmediate` callback so the vault read returns to its caller without
+ * waiting on SQLite + WebSocket I/O — see T-PERSISTENT-001 mitigation #2
+ * requirement "non-blocking".
  */
 
 import type Database from 'better-sqlite3';
 import { randomUUID } from 'node:crypto';
-import type { AuditDecision, AuditEntry } from './types.js';
+import type { AuditDecision, AuditEntry, VaultAccessUpdate } from './types.js';
+import { logger } from './logger.js';
+
+/**
+ * T-PERSISTENT-001 mitigation #2 — broadcaster interface for vault-access
+ * audit rows. Only `broadcastVaultAccess` is required; the existing
+ * server.ts audit-broadcast path is unaffected (it uses
+ * `ApprovalStream.broadcastAudit` directly).
+ *
+ * Defined as a structural type (not a class import) so this file doesn't
+ * circular-depend on `approval-stream.ts` (which imports `AuditEntry`
+ * from `types.ts`). `ApprovalStream` satisfies this interface at the
+ * `setBroadcaster` call site (server.ts / hub startup).
+ */
+export interface VaultAccessBroadcaster {
+  broadcastVaultAccess(notif: VaultAccessUpdate): void;
+}
+
+/**
+ * Result code for a `TokenVault.getAccessToken()` call. Stored implicitly
+ * via the `decision` (always `'vault_access'`) + `error` (NULL for
+ * success, populated with a short message for the other three) columns.
+ *
+ * `'denied'` is reserved for future policy hooks (e.g. require extra
+ * approval for a sensitive plugin's tokens). Today, no caller passes it.
+ */
+export type VaultAccessResult = 'success' | 'denied' | 'not_found' | 'error';
+
+export interface VaultAccessInput {
+  plugin: string;
+  actor_type: 'agent' | 'user' | 'system';
+  actor_id: string;
+  tool_name?: string | null;
+  request_id?: string | null;
+  result: VaultAccessResult;
+  error_message?: string | null;
+}
 
 export interface AuditAppendInput {
   agent_id: string;
@@ -69,6 +119,24 @@ export interface AuditAppendInput {
    * (e.g. "AUTH_EXPIRED"). Set together with `error_class`.
    */
   error_code?: string | null;
+  /**
+   * T-PERSISTENT-001 mitigation #2 — who triggered the vault decryption
+   * (only set on `decision = 'vault_access'` rows). `'agent'` for an MCP
+   * call from an AI agent, `'user'` for direct hub-initiated OAuth flows,
+   * `'system'` for proactive refreshes and other internal callers.
+   */
+  actor_type?: string | null;
+  /**
+   * T-PERSISTENT-001 mitigation #2 — identifier of the actor above
+   * (e.g. the agent_id from the MCP request, or 'local-user').
+   */
+  actor_id?: string | null;
+  /**
+   * T-PERSISTENT-001 mitigation #2 — correlation ID from the originating
+   * MCP call. Lets the Android UI join a vault-decryption row with its
+   * matching tool-call audit row in the live stream.
+   */
+  request_id?: string | null;
 }
 
 export interface AuditQueryOptions {
@@ -87,6 +155,14 @@ export interface AuditQueryOptions {
 }
 
 export class AuditLog {
+  /**
+   * T-PERSISTENT-001 mitigation #2 — optional broadcaster for vault-access
+   * audit rows. Set via `setBroadcaster()` from hub startup. When unset
+   * (tests, CLI tools), `recordVaultAccess()` still writes to SQLite but
+   * skips the WebSocket broadcast.
+   */
+  private broadcaster: VaultAccessBroadcaster | null = null;
+
   constructor(private readonly db: Database.Database) {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS audit_log (
@@ -106,7 +182,10 @@ export class AuditLog {
         delegated_to TEXT,
         decision_federated TEXT,
         error_class TEXT,
-        error_code TEXT
+        error_code TEXT,
+        actor_type TEXT,
+        actor_id TEXT,
+        request_id TEXT
       );
       CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_log(timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_audit_agent ON audit_log(agent_id);
@@ -114,6 +193,148 @@ export class AuditLog {
       CREATE INDEX IF NOT EXISTS idx_audit_tool ON audit_log(tool_name);
       CREATE INDEX IF NOT EXISTS idx_audit_decision ON audit_log(decision);
     `);
+  }
+
+  /**
+   * T-PERSISTENT-001 mitigation #2 — wire the WebSocket broadcaster used
+   * by `recordVaultAccess()`. Pass `null` to disable broadcasting (e.g.
+   * in tests or CLI tools that don't run an `/approval-stream` server).
+   * Safe to call multiple times (e.g. when hub reloads its approval
+   * stream).
+   */
+  setBroadcaster(broadcaster: VaultAccessBroadcaster | null): void {
+    this.broadcaster = broadcaster;
+  }
+
+  /**
+   * T-PERSISTENT-001 mitigation #2 — record one vault-decryption event.
+   *
+   * Writes a `decision = 'vault_access'` row to `audit_log` and, if a
+   * broadcaster is wired, pushes a `vault_access` WebSocket frame to
+   * connected Android clients (filtered by `userAgent === 'android-hub'`
+   * inside `ApprovalStream.broadcastVaultAccess`).
+   *
+   * Non-blocking: the SQLite write + WebSocket broadcast happen inside
+   * a `setImmediate` callback so the calling `TokenVault.getAccessToken`
+   * returns to its caller without waiting on disk I/O. The `result` is
+   * encoded as follows:
+   *
+   *   - `'success'`   — no `error` column (plain success row).
+   *   - `'not_found'` — `error = 'no_token_for_plugin:<plugin>'`. The
+   *                     caller still throws the original error.
+   *   - `'denied'`    — reserved for future policy hooks (no caller
+   *                     passes it today; writes `error =
+   *                     'denied_by_policy'`).
+   *   - `'error'`     — `error = <input.error_message ?? 'decrypt_failed'>`.
+   *
+   * `setImmediate` callbacks can be flushed before process exit; for the
+   * daemonized hub this is fine (the audit write happens milliseconds
+   * after the decrypt returns and is persisted by the SQLite WAL). For
+   * short-lived tests we expose a synchronous variant via
+   * `recordVaultAccessSync()` that callers can await when ordering matters.
+   */
+  recordVaultAccess(input: VaultAccessInput): void {
+    setImmediate(() => {
+      const errorValue =
+        input.result === 'success'
+          ? null
+          : input.error_message ??
+            (input.result === 'not_found'
+              ? `no_token_for_plugin:${input.plugin}`
+              : input.result === 'denied'
+                ? 'denied_by_policy'
+                : 'decrypt_failed');
+
+      let entry: AuditEntry;
+      try {
+        entry = this.append({
+          agent_id: input.actor_id,
+          user_id: 'local-user',
+          tool_name: input.tool_name ?? '',
+          plugin: input.plugin,
+          scope: 'vault:decrypt',
+          justification: null,
+          decision: 'vault_access',
+          grant_id: null,
+          duration_ms: 0,
+          ...(errorValue ? { error: errorValue } : {}),
+          delegated_by: null,
+          delegated_to: null,
+          decision_federated: null,
+          actor_type: input.actor_type,
+          actor_id: input.actor_id,
+          request_id: input.request_id ?? null,
+        });
+      } catch (err) {
+        logger.error('vault audit write failed', {
+          plugin: input.plugin,
+          error: (err as Error).message,
+        });
+        return;
+      }
+
+      if (this.broadcaster) {
+        try {
+          this.broadcaster.broadcastVaultAccess({ type: 'vault_access', entry });
+        } catch (err) {
+          logger.warn('vault audit broadcast failed', {
+            plugin: input.plugin,
+            error: (err as Error).message,
+          });
+        }
+      }
+    });
+  }
+
+  /**
+   * T-PERSISTENT-001 mitigation #2 — synchronous variant of
+   * `recordVaultAccess()` for tests that need to assert on the written
+   * row before the test ends. Production code paths use
+   * `recordVaultAccess()` (non-blocking). The broadcaster is called
+   * inline here so tests can observe the WebSocket frame too.
+   */
+  recordVaultAccessSync(input: VaultAccessInput): AuditEntry {
+    const errorValue =
+      input.result === 'success'
+        ? null
+        : input.error_message ??
+          (input.result === 'not_found'
+            ? `no_token_for_plugin:${input.plugin}`
+            : input.result === 'denied'
+              ? 'denied_by_policy'
+              : 'decrypt_failed');
+
+    const entry = this.append({
+      agent_id: input.actor_id,
+      user_id: 'local-user',
+      tool_name: input.tool_name ?? '',
+      plugin: input.plugin,
+      scope: 'vault:decrypt',
+      justification: null,
+      decision: 'vault_access',
+      grant_id: null,
+      duration_ms: 0,
+      ...(errorValue ? { error: errorValue } : {}),
+      delegated_by: null,
+      delegated_to: null,
+      decision_federated: null,
+      actor_type: input.actor_type,
+      actor_id: input.actor_id,
+      request_id: input.request_id ?? null,
+    });
+
+    if (this.broadcaster) {
+      try {
+        this.broadcaster.broadcastVaultAccess({ type: 'vault_access', entry });
+      } catch (err) {
+        logger.warn('vault audit broadcast failed', {
+          plugin: input.plugin,
+          error: (err as Error).message,
+        });
+      }
+    }
+
+    return entry;
   }
 
   /**
@@ -128,14 +349,18 @@ export class AuditLog {
       decision_federated: input.decision_federated ?? null,
       error_class: input.error_class ?? null,
       error_code: input.error_code ?? null,
+      actor_type: input.actor_type ?? null,
+      actor_id: input.actor_id ?? null,
+      request_id: input.request_id ?? null,
       ...input,
     };
     this.db.prepare(`
       INSERT INTO audit_log (id, timestamp, agent_id, user_id, tool_name, plugin, scope,
                              justification, decision, grant_id, duration_ms, error,
                              delegated_by, delegated_to, decision_federated,
-                             error_class, error_code)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                             error_class, error_code,
+                             actor_type, actor_id, request_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       entry.id,
       entry.timestamp,
@@ -154,6 +379,9 @@ export class AuditLog {
       entry.decision_federated ?? null,
       entry.error_class ?? null,
       entry.error_code ?? null,
+      entry.actor_type ?? null,
+      entry.actor_id ?? null,
+      entry.request_id ?? null,
     );
     return entry;
   }
@@ -191,7 +419,8 @@ export class AuditLog {
       SELECT id, timestamp, agent_id, user_id, tool_name, plugin, scope,
              justification, decision, grant_id, duration_ms, error,
              delegated_by, delegated_to, decision_federated,
-             error_class, error_code
+             error_class, error_code,
+             actor_type, actor_id, request_id
       FROM audit_log
       ${where.length > 0 ? 'WHERE ' + where.join(' AND ') : ''}
       ORDER BY timestamp DESC
@@ -220,7 +449,8 @@ export class AuditLog {
         `SELECT id, timestamp, agent_id, user_id, tool_name, plugin, scope,
                 justification, decision, grant_id, duration_ms, error,
                 delegated_by, delegated_to, decision_federated,
-                error_class, error_code
+                error_class, error_code,
+                actor_type, actor_id, request_id
          FROM audit_log
          WHERE error_code = ?
          ORDER BY timestamp DESC
@@ -247,6 +477,7 @@ export class AuditLog {
       expired: 0,
       revoked: 0,
       error: 0,
+      vault_access: 0,
     };
     for (const row of rows) {
       result[row.decision] = row.count;
@@ -317,6 +548,9 @@ interface AuditRow {
   decision_federated: string | null;
   error_class: string | null;
   error_code: string | null;
+  actor_type: string | null;
+  actor_id: string | null;
+  request_id: string | null;
 }
 
 function rowToEntry(row: AuditRow): AuditEntry {
@@ -338,5 +572,8 @@ function rowToEntry(row: AuditRow): AuditEntry {
     decision_federated: row.decision_federated,
     error_class: row.error_class,
     error_code: row.error_code,
+    actor_type: row.actor_type,
+    actor_id: row.actor_id,
+    request_id: row.request_id,
   };
 }

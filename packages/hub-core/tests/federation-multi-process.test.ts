@@ -158,6 +158,16 @@ async function startHubSide(opts: {
   for (const p of plugins) {
     registry.add(fakePlugin(p));
   }
+  // T-PERSISTENT-001 mitigation #2 — store a token per plugin so
+  // `TokenVault.getAccessToken()` succeeds inside the server's call
+  // path (it now throws on not_found).
+  for (const p of plugins) {
+    tokens.store({
+      plugin: p.name,
+      access_token: `fake-token-${p.name}`,
+      scope: p.tools[0]?.scope ?? 'plugin:read',
+    });
+  }
 
   const hubIdentity = HubIdentity.generate(opts.hubName, MASTER_KEY);
   hubIdentity.save(db);
