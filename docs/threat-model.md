@@ -334,6 +334,81 @@ The mnemonic is a fallback for master key loss. Write it on paper; don't store d
 
 **Source:** `packages/hub-core/src/backup.ts`.
 
+## Critical threat scenarios
+
+These are **explicit threat scenarios** that we name and analyze individually. Each has a unique ID (`T-XXX-NNN`) for tracking across docs, issues, and audits.
+
+### T-PERSISTENT-001: Refresh token extraction after laptop compromise
+
+**Attack scenario (full chain):**
+
+1. Attacker gains physical or root access to user's laptop (theft, malicious insider, malware with kernel-level compromise, evil-maid attack).
+2. Attacker reads `master_key` from `/proc/<pid>/cmdline` of the running `pdatahub-hub` process. **On Linux, this file is world-readable by default** — no privilege escalation required.
+3. Attacker copies the encrypted vault file (e.g. `~/.local/share/pdatahub/hub.db`) via filesystem access.
+4. Attacker runs offline decryption: `AES-256-GCM(key = HKDF(master_key, plugin_name, "pdatahub-token-vault-v1"), iv, ciphertext)` for each plugin.
+5. Attacker extracts the `refresh_token` for Google Calendar (or any plugin the user authorized).
+6. Attacker leaves the laptop, takes the refresh_token to any device anywhere.
+7. Attacker mints fresh `access_token`s indefinitely via Google's token endpoint: `POST https://oauth2.googleapis.com/token` with `grant_type=refresh_token&refresh_token=...`. **No user interaction required, no Android approval triggered.**
+8. Attacker reads/writes Google Calendar forever, until user manually revokes at https://myaccount.google.com/permissions.
+
+**Why this bypasses Android approval:**
+
+Android approval is per-**plugin call** (via `pdatahub-hub → POST /v1/plugins/google-calendar/authenticate`). Refresh token usage happens **outside** the plugin subprocess — the attacker calls Google's token endpoint directly with the stolen refresh_token, getting a fresh access_token, then calls Calendar API directly. The phone never sees a notification because no `pdatahub-hub` invocation happened.
+
+**Impact:**
+
+- **Full account compromise** for every plugin the user authorized (calendar, mail, contacts, etc.).
+- **Persistent** — until user manually revokes at each provider.
+- **Undetectable from Android** — phone UI sees no approval flow because no `pdatahub-hub` request happened.
+- **Geographically unrestricted** — attacker operates from any device with internet.
+
+**Likelihood:**
+
+- **MEDIUM** as a capability (any moderately-skilled attacker can do this once they have laptop access).
+- **LOW-MEDIUM** as an occurrence (requires laptop compromise, which itself is uncommon).
+- **Severity-weighted likelihood: HIGH** because the impact is total compromise, and the prerequisites (laptop access + 5 minutes + reading 2 files) are modest.
+
+**Why current mitigations are insufficient:**
+
+| Mitigation | Why it doesn't help here |
+|------------|--------------------------|
+| AES-256-GCM vault encryption | Doesn't help — attacker also has the master_key |
+| HKDF per-plugin keys | Doesn't help — derived from same master_key the attacker has |
+| Per-action phone approval | Doesn't trigger — attack happens outside hub-core |
+| Time-bounded grants (1h) | Doesn't help — attacker uses refresh_token, never invokes hub-core |
+| Tailscale mesh | Doesn't help — attacker uses Google API directly |
+| HUB_API_TOKEN bearer auth | Doesn't help — attack never hits hub-core |
+| Append-only audit log | Doesn't help — attack never triggers an audit entry |
+| BIP-39 backup | Doesn't help — recovery mechanism, not prevention |
+
+**Real mitigation requirements:**
+
+| # | Mitigation | Effect | Effort |
+|---|-----------|--------|--------|
+| 1 | **master_key в system keyring** (Linux Secret Service via libsecret / macOS Keychain / Windows DPAPI) instead of CLI args | `master_key` no longer readable from `/proc/<pid>/cmdline` — attacker needs additional local privilege escalation | Medium (3-5 days, all platforms) |
+| 2 | **TPM-backed key sealing** (Linux: tpm2-tss, Windows: TPM, macOS: Secure Enclave) | `master_key` cryptographically bound to hardware — can't be exfiltrated even with root | Hard (1-2 weeks, platform-specific) |
+| 3 | **Refresh token rotation on every use** (Google's `prompt=consent` returns rotated refresh_token) | Each refresh invalidates old refresh_token — limits window if extracted | Easy (config flag, 1 day) |
+| 4 | **Refresh token bound to client fingerprint** (RFC 8252 §8.1) | Refresh_token only works from same IP/UA fingerprint — extracted token unusable elsewhere | Medium (Google-specific, 3 days) |
+| 5 | **Anomaly detection** — Google FCM push to Android on suspicious access_token use from new IP/geo | User alerted within minutes, can revoke at provider | Medium (provider-specific, 1 week) |
+| 6 | **Android remote kill switch** — user can disable hub-core from phone even when laptop is offline | Reduces window of vulnerability | Medium (3-5 days) |
+| 7 | **Audit log of vault decryptions** — every `getAccessToken()` call writes audit row, streamed to Android in real-time | Detects post-extraction re-use if attacker uses hub-core itself | Easy (1 day, audit infrastructure already exists) |
+| 8 | **Mandatory FIDO2/WebAuthn** for master_key rotation | Forces physical key for recovery, blocks remote rotation attacks | Hard (1 week, requires hardware) |
+
+**Minimum viable hardening for v0.3.0 (priority order):**
+
+1. **#1 master_key в system keyring** — single biggest win. Removes the trivial `/proc/<pid>/cmdline` exfiltration. Attacker now needs root + ability to call keyring APIs.
+2. **#7 Audit log of every vault decryption** — detects if attacker tries to use hub-core itself with stolen key. Streams to Android live.
+3. **#3 Refresh token rotation** — limits persistence window if exfiltrated.
+
+**Until v0.3.0 lands, users MUST:**
+
+- Use full-disk encryption (FileVault / BitLocker / LUKS) on the laptop.
+- Treat physical access to the laptop as equivalent to access to all authorized plugin data.
+- Regularly audit `https://myaccount.google.com/permissions` and revoke plugins that are no longer needed.
+- Rotate master_key periodically (manual: backup → restore with new key → re-authorize all plugins). Not currently automated.
+
+**Status:** Accepted residual risk in v0.x. The user explicitly accepts this trade-off when using the MVP. Mitigation #1, #7, #3 are scheduled for v0.3.0.
+
 ## Out of scope (current limitations)
 
 These are **accepted residual risks** in v0.x. We are explicit about them so users can make informed decisions.
@@ -350,6 +425,7 @@ These are **accepted residual risks** in v0.x. We are explicit about them so use
 | **Federation: no perfect forward secrecy** — Ed25519 doesn't ratchet. | Per-call phone approval is the backstop. | v3.1 (`key_epoch`) |
 | **Cloud v3: cross-tenant log mining** — operator can correlate logs across users on shared infra. | Separate VMs per tenant; audit log kept on the VM, not centralized. | Cloud v3.1 (per-tenant encryption) |
 | **Local-attacker bypass of audit log** — process-level attacker can `DROP TABLE audit_log`. | Rely on host security (full-disk encryption, screen lock, no shared laptops). | v4 (TPM attestation) |
+| **T-PERSISTENT-001: Refresh token extraction after laptop compromise** — `master_key` in process args (`/proc/<pid>/cmdline` world-readable) + vault on disk = offline decrypt of refresh_tokens, indefinite bypass of Android approval. | Disk encryption (out of scope); user accepts this trade-off for MVP. | v0.3.0 (master_key в system keyring) |
 
 ## Future hardening
 
@@ -357,6 +433,9 @@ These are **accepted residual risks** in v0.x. We are explicit about them so use
 |-----------|------|------------------|
 | **Hardware Security Module (HSM) for master key** | v4 | A5 (compromised laptop) loses master key access |
 | **TPM-backed hub attestation** | v4 | A5 cannot tamper with audit log or token vault unnoticed |
+| **master_key в system keyring** (Linux Secret Service / macOS Keychain / Windows DPAPI) | v0.3.0 | T-PERSISTENT-001 — removes trivial `/proc/<pid>/cmdline` exfiltration |
+| **Refresh token rotation on every use** (`prompt=consent` flag) | v0.3.0 | T-PERSISTENT-001 — limits persistence window if extracted |
+| **Audit log of every vault decryption** (streamed to Android live) | v0.3.0 | T-PERSISTENT-001 — detects post-extraction re-use via hub-core |
 | **OAuth step-up auth for high-risk scopes** | v3 | A2 (malicious agent) needs extra verification for `calendar:write`, `mail:send`, etc. |
 | **WebAuthn for hub-core admin actions** | v3.5 | A4 (compromised phone) cannot rotate master key without physical security key |
 | **Plugin signature verification** | v3.1 | A1 (malicious plugin) cannot impersonate a legitimate one |
