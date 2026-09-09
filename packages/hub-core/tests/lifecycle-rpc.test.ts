@@ -15,13 +15,17 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { PluginError as SdkPluginError } from '@pdatahub/plugin-sdk';
 import { PluginProcess } from '../src/plugin-process.js';
 
-const MOCK_PLUGIN = '/tmp/opencode/lifecycle-test/mock-plugin.js';
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const FIXTURE_DIR = join(__dirname, 'fixtures');
+const FIXTURE_PLUGIN = join(FIXTURE_DIR, 'mock-plugin.cjs');
+const MOCK_PLUGIN = '/tmp/opencode/lifecycle-test/mock-plugin.cjs';
 let tempDir: string;
 let traceFile: string;
 const originalEnv = { ...process.env };
@@ -36,6 +40,7 @@ beforeEach(() => {
   if (!existsSync('/tmp/opencode/lifecycle-test')) {
     mkdirSync('/tmp/opencode/lifecycle-test', { recursive: true });
   }
+  copyFileSync(FIXTURE_PLUGIN, MOCK_PLUGIN);
   tempDir = mkdtempSync(join(tmpdir(), 'pdatahub-lifecycle-'));
   traceFile = join(tempDir, 'trace.txt');
 });
