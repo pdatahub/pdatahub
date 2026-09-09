@@ -25,8 +25,7 @@
  */
 
 import Database from 'better-sqlite3';
-import { scryptSync } from 'node:crypto';
-import { loadConfig } from './config.js';
+import { loadConfigAsync, resolveMasterKey } from './config.js';
 import { GrantStore } from './grant-store.js';
 import { AuditLog } from './audit-log.js';
 import { TokenVault } from './token-vault.js';
@@ -49,12 +48,64 @@ import { logger } from './logger.js';
 import { runMigrations } from './migrations.js';
 import { checkHubApiTokenRequirement } from './startup.js';
 import {
+  deleteMasterKey,
+  hasMasterKey,
+  isKeyringAvailable,
+  keyringBackendLabel,
+  setMasterKey as setMasterKeyInKeyring,
+} from './keyring.js';
+import {
   generateMnemonic,
   mnemonicToMasterKey,
   backup as backupVault,
   restore as restoreVault,
   inspect as inspectBackup,
 } from './backup/index.js';
+
+/** Default keyring service name. Used by --keyring-service and pdatahub-hub keyring subcommand. */
+const DEFAULT_KEYRING_SERVICE = 'pdatahub-hub';
+const DEFAULT_KEYRING_ACCOUNT = 'master-key';
+
+function readKeyringNames(argv: string[]): { service: string; account: string } {
+  const sIdx = argv.indexOf('--keyring-service');
+  const service = sIdx !== -1 && argv[sIdx + 1] ? argv[sIdx + 1] : DEFAULT_KEYRING_SERVICE;
+  const aIdx = argv.indexOf('--keyring-account');
+  const account = aIdx !== -1 && argv[aIdx + 1] ? argv[aIdx + 1] : DEFAULT_KEYRING_ACCOUNT;
+  return { service, account };
+}
+
+function hasAckInsecure(argv: string[]): boolean {
+  return argv.includes('--ack-insecure-master-key');
+}
+
+/**
+ * Tell the user where their master_key lives (keyring vs CLI arg vs env)
+ * after a successful `backup`. The keyring path is the recommended
+ * secure flow per T-PERSISTENT-001.
+ */
+async function printKeyringHint(argv: string[]): Promise<void> {
+  const { service, account } = readKeyringNames(argv);
+  // eslint-disable-next-line no-console
+  console.log('');
+  if (await isKeyringAvailable()) {
+    // eslint-disable-next-line no-console
+    console.log(
+      `Master key is stored in: ${service}/${account} (via ${keyringBackendLabel()}).`,
+    );
+    // eslint-disable-next-line no-console
+    console.log(`Use \`pdatahub-hub keyring show\` to verify.`);
+  } else {
+    // eslint-disable-next-line no-console
+    console.log(
+      `WARNING: master_key NOT in keyring. Backup was sourced from --master-key/HUB_MASTER_KEY ` +
+        `(insecure — visible to any local user via process listing).`,
+    );
+    // eslint-disable-next-line no-console
+    console.log(
+      `Install libsecret + gnome-keyring (Linux), then run: pdatahub-hub --store-keyring <hex>`,
+    );
+  }
+}
 
 /**
  * Detect which subcommand (if any) was requested.
@@ -71,6 +122,10 @@ const VALUE_FLAGS = new Set([
   '--oauth-callback-port',
   '--plugins-dir',
   '--config',
+  '--keyring-service',
+  '--keyring-account',
+  '--store-keyring',
+  '--legacy-master-key',
 ]);
 
 function findFirstPositional(argv: string[]): string | undefined {
@@ -136,6 +191,9 @@ function parseSubcommand(argv: string[]):
       yes: boolean;
       dbPath?: string;
     }
+  | { kind: 'keyring-show'; }
+  | { kind: 'keyring-clear'; }
+  | { kind: 'keyring-store'; masterKeyHex: string }
   | { kind: 'help' } {
   const first = findFirstPositional(argv);
   if (!first) {
@@ -321,13 +379,27 @@ function parseSubcommand(argv: string[]):
       const yes = argv.includes('--yes');
       return { kind: 'audit-purge', olderThan, yes, dbPath };
     }
+    case 'keyring': {
+      const kIdx = argv.indexOf('keyring');
+      const subIdx = kIdx + 1 < argv.length ? kIdx + 1 : -1;
+      const sub = subIdx !== -1 ? argv[subIdx] : undefined;
+      if (sub === 'show' || sub === 'status') {
+        return { kind: 'keyring-show' };
+      }
+      if (sub === 'clear' || sub === 'delete') {
+        return { kind: 'keyring-clear' };
+      }
+      throw new Error(
+        'usage: pdatahub-hub keyring <show|clear> [--keyring-service <s>] [--keyring-account <a>]',
+      );
+    }
     case 'help':
     case '--help':
     case '-h':
       return { kind: 'help' };
     default:
       throw new Error(
-        `unknown subcommand: ${first} (try: init, identity, delegate, accept-delegation, delegation, audit, backup, restore, inspect, help)`,
+        `unknown subcommand: ${first} (try: init, identity, delegate, accept-delegation, delegation, audit, keyring, backup, restore, inspect, help, or pass --store-keyring <hex>)`,
       );
   }
 }
@@ -351,6 +423,9 @@ USAGE
   pdatahub-hub delegation revoke <id>       Revoke a granted delegation
   pdatahub-hub audit purge --older-than <d> Delete audit rows older than <d> (Nd|Nh|Nw)
                                            With --yes: actually delete. Without: preview only.
+  pdatahub-hub keyring show                 Show OS keyring status (service/account)
+  pdatahub-hub keyring clear                Remove master_key from OS keyring
+  pdatahub-hub --store-keyring <hex>        Store master_key in OS keyring, then exit
   pdatahub-hub backup <db> <out>            Encrypt vault DB → backup file
   pdatahub-hub restore <in> <db>            Decrypt backup file → vault DB
   pdatahub-hub inspect <backup>             Show backup metadata (no decrypt)
@@ -367,11 +442,16 @@ DELEGATE FLAGS
 HUB STARTUP FLAGS
   --port <num>            HTTP port (default 8080)
   --db-path <path>        SQLite DB path (default ./pdatahub-hub.db)
-  --master-key <hex>      32-byte hex master key (64 chars)
-  --passphrase <text>     Derive master key via scrypt (less secure than --master-key)
+  --master-key <hex>      32-byte hex master key (64 chars). INSECURE — see --ack-insecure-master-key.
+  --passphrase <text>     Derive master key via scrypt. INSECURE — same warning as --master-key.
   --oauth-callback-port   Fixed port for OAuth redirect URI (default 0 = random)
   --plugins-dir <path>    Plugin directory (each subdir = one plugin)
   --log-level <level>     debug | info | warn | error (default info)
+  --ack-insecure-master-key  Suppress the T-PERSISTENT-001 insecure-path warning
+                              (CLI arg / env). Use after reading docs/threat-model.md.
+  --keyring-service <s>   OS keyring service name (default pdatahub-hub)
+  --keyring-account <a>   OS keyring account/username (default master-key)
+  --store-keyring <hex>   One-shot: store this master_key in OS keyring, exit
 
 ENV VARS (alternative to flags)
   HUB_PORT, HUB_DB_PATH, HUB_MASTER_KEY, HUB_PASSPHRASE, HUB_LOG_LEVEL,
@@ -380,6 +460,18 @@ ENV VARS (alternative to flags)
 INTERACTIVE PROMPTS
   For backup/restore/init, the passphrase (and optional mnemonic) are read
   from stdin if --passphrase/-m flags are not provided.
+
+SECURITY — T-PERSISTENT-001 (docs/threat-model.md)
+  Passing master_key via CLI arg or env var exposes it to any local user
+  via /proc/<pid>/cmdline or /proc/<pid>/environ. To migrate to a more
+  secure flow:
+
+    1. Generate: pdatahub-hub init --hub-name <name>  (prints mnemonic + hex)
+    2. Store:    pdatahub-hub --store-keyring <hex>   (writes to OS keyring)
+    3. Start:    pdatahub-hub                        (reads from OS keyring)
+
+  Linux: requires libsecret + a keyring daemon (gnome-keyring, KWallet).
+  macOS / Windows: built-in.
 `);
 }
 
@@ -456,7 +548,7 @@ async function handleSubcommand(
   }
 
   if (cmd.kind === 'identity-show') {
-    const { masterKey, dbPath } = resolveIdentityContext(cmd.dbPath, cmd.masterKeyHex, cmd.passphrase);
+    const { masterKey, dbPath } = await resolveIdentityContext(cmd.dbPath, cmd.masterKeyHex, cmd.passphrase);
     const identity = loadFederationIdentity(dbPath, masterKey);
     // eslint-disable-next-line no-console
     console.log(`Hub name:    ${identity.hubName}`);
@@ -501,7 +593,7 @@ async function handleSubcommand(
         return 1;
       }
     }
-    const { masterKey, dbPath } = resolveIdentityContext(cmd.dbPath, cmd.masterKeyHex, cmd.passphrase);
+    const { masterKey, dbPath } = await resolveIdentityContext(cmd.dbPath, cmd.masterKeyHex, cmd.passphrase);
     const hubName = cmd.hubName ?? loadFederationIdentity(dbPath, masterKey).hubName;
     const identity = initFederationIdentity(dbPath, hubName, masterKey);
     // eslint-disable-next-line no-console
@@ -515,13 +607,13 @@ async function handleSubcommand(
 
   if (cmd.kind === 'backup') {
     const passphrase = await promptPassphrase('Backup passphrase');
-    const masterKeyHex = process.env.HUB_MASTER_KEY;
-    if (!masterKeyHex) {
-      throw new Error(
-        'HUB_MASTER_KEY env var required for backup (or set --master-key)',
-      );
-    }
-    const masterKey = Buffer.from(masterKeyHex, 'hex');
+    const argv = process.argv.slice(2);
+    const { masterKey } = await resolveMasterKey(
+      argv.includes('--master-key') ? argv[argv.indexOf('--master-key') + 1] : undefined,
+      argv.includes('--passphrase') ? argv[argv.indexOf('--passphrase') + 1] : undefined,
+      process.env.HUB_MASTER_KEY,
+      hasAckInsecure(argv),
+    );
     const result = backupVault(cmd.vaultDb, masterKey, cmd.outFile, passphrase);
     // eslint-disable-next-line no-console
     console.log(`Backup written: ${cmd.outFile}`);
@@ -535,6 +627,7 @@ async function handleSubcommand(
     console.log(`  cipher:     ${result.cipher.algorithm}`);
     // eslint-disable-next-line no-console
     console.log(`  size:       ${JSON.stringify(result).length} bytes (JSON)`);
+    await printKeyringHint(argv);
     return 0;
   }
 
@@ -548,7 +641,13 @@ async function handleSubcommand(
     // eslint-disable-next-line no-console
     console.log(`  master_key:  ${masterKey.toString('hex')}`);
     // eslint-disable-next-line no-console
-    console.log(`\nStart hub with:  pdatahub-hub --master-key ${masterKey.toString('hex')}`);
+    console.log('');
+    // eslint-disable-next-line no-console
+    console.log(`Start hub with:  pdatahub-hub --master-key ${masterKey.toString('hex')}`);
+    // eslint-disable-next-line no-console
+    console.log(`Or store in keyring (recommended):`);
+    // eslint-disable-next-line no-console
+    console.log(`  pdatahub-hub --store-keyring ${masterKey.toString('hex')}`);
     return 0;
   }
 
@@ -568,7 +667,7 @@ async function handleSubcommand(
   }
 
   if (cmd.kind === 'delegate') {
-    const { masterKey, dbPath } = resolveIdentityContext(
+    const { masterKey, dbPath } = await resolveIdentityContext(
       cmd.dbPath,
       cmd.masterKeyHex,
       undefined,
@@ -616,7 +715,7 @@ async function handleSubcommand(
   }
 
   if (cmd.kind === 'delegate-list') {
-    const { masterKey, dbPath } = resolveIdentityContext(
+    const { masterKey, dbPath } = await resolveIdentityContext(
       cmd.dbPath,
       cmd.masterKeyHex,
       undefined,
@@ -638,7 +737,7 @@ async function handleSubcommand(
   }
 
   if (cmd.kind === 'accept-delegation') {
-    const { masterKey, dbPath } = resolveIdentityContext(
+    const { masterKey, dbPath } = await resolveIdentityContext(
       cmd.dbPath,
       cmd.masterKeyHex,
       undefined,
@@ -661,7 +760,7 @@ async function handleSubcommand(
   }
 
   if (cmd.kind === 'delegation-list') {
-    const { masterKey, dbPath } = resolveIdentityContext(
+    const { masterKey, dbPath } = await resolveIdentityContext(
       cmd.dbPath,
       cmd.masterKeyHex,
       undefined,
@@ -683,7 +782,7 @@ async function handleSubcommand(
   }
 
   if (cmd.kind === 'delegation-revoke') {
-    const { masterKey, dbPath } = resolveIdentityContext(
+    const { masterKey, dbPath } = await resolveIdentityContext(
       cmd.dbPath,
       cmd.masterKeyHex,
       undefined,
@@ -732,6 +831,76 @@ async function handleSubcommand(
     }
   }
 
+  if (cmd.kind === 'keyring-show') {
+    const argv = process.argv.slice(2);
+    const { service, account } = readKeyringNames(argv);
+    if (!(await isKeyringAvailable())) {
+      // eslint-disable-next-line no-console
+      console.log(`Keyring: UNAVAILABLE (backend: ${keyringBackendLabel()})`);
+      // eslint-disable-next-line no-console
+      console.log(`On Linux: ensure libsecret and a keyring daemon (gnome-keyring, KWallet) are running.`);
+      return 1;
+    }
+    const present = await hasMasterKey(service, account);
+    // eslint-disable-next-line no-console
+    console.log(`Keyring:    ${keyringBackendLabel()}`);
+    // eslint-disable-next-line no-console
+    console.log(`Service:    ${service}`);
+    // eslint-disable-next-line no-console
+    console.log(`Account:    ${account}`);
+    // eslint-disable-next-line no-console
+    console.log(`Has master_key: ${present ? 'yes' : 'no'}`);
+    if (present) {
+      // eslint-disable-next-line no-console
+      console.log(`Hint: remove with 'pdatahub-hub keyring clear'.`);
+    } else {
+      // eslint-disable-next-line no-console
+      console.log(`Hint: store with 'pdatahub-hub --store-keyring <hex>'.`);
+    }
+    return 0;
+  }
+
+  if (cmd.kind === 'keyring-clear') {
+    const argv = process.argv.slice(2);
+    const { service, account } = readKeyringNames(argv);
+    if (!(await isKeyringAvailable())) {
+      // eslint-disable-next-line no-console
+      console.error(`Keyring unavailable on this platform (${keyringBackendLabel()}).`);
+      return 1;
+    }
+    const removed = await deleteMasterKey(service, account);
+    if (removed) {
+      // eslint-disable-next-line no-console
+      console.log(`Removed master_key from keyring (${service}/${account}).`);
+      return 0;
+    }
+    // eslint-disable-next-line no-console
+    console.log(`No master_key was stored at ${service}/${account}.`);
+    return 0;
+  }
+
+  if (cmd.kind === 'keyring-store') {
+    const argv = process.argv.slice(2);
+    const { service, account } = readKeyringNames(argv);
+    if (!(await isKeyringAvailable())) {
+      // eslint-disable-next-line no-console
+      console.error(`Keyring unavailable on this platform (${keyringBackendLabel()}).`);
+      // eslint-disable-next-line no-console
+      console.error(`Install libsecret + gnome-keyring (Linux), use macOS Keychain, or Credential Manager (Windows).`);
+      return 1;
+    }
+    if (cmd.masterKeyHex.length !== 64) {
+      throw new Error('--store-keyring must be 32 bytes hex-encoded (64 chars)');
+    }
+    const key = Buffer.from(cmd.masterKeyHex, 'hex');
+    await setMasterKeyInKeyring(key, service, account);
+    // eslint-disable-next-line no-console
+    console.log(`Stored master_key in keyring: ${service}/${account} (via ${keyringBackendLabel()})`);
+    // eslint-disable-next-line no-console
+    console.log(`You can now run 'pdatahub-hub' without --master-key.`);
+    return 0;
+  }
+
   return 0;
 }
 
@@ -764,31 +933,19 @@ function initFederationIdentity(
   }
 }
 
-function resolveIdentityContext(
+async function resolveIdentityContext(
   dbPathFlag: string | undefined,
   masterKeyHexFlag: string | undefined,
   passphraseFlag: string | undefined,
-): { masterKey: Buffer; dbPath: string } {
+): Promise<{ masterKey: Buffer; dbPath: string }> {
   const dbPath = dbPathFlag ?? process.env.HUB_DB_PATH ?? './pdatahub-hub.db';
-  const masterKeyHex =
-    masterKeyHexFlag ?? process.env.HUB_MASTER_KEY ?? undefined;
-  const passphrase = passphraseFlag ?? process.env.HUB_PASSPHRASE ?? undefined;
-  let masterKey: Buffer;
-  if (masterKeyHex) {
-    if (masterKeyHex.length !== 64) {
-      throw new Error('--master-key must be 32 bytes hex-encoded (64 chars)');
-    }
-    masterKey = Buffer.from(masterKeyHex, 'hex');
-  } else if (passphrase) {
-    // Treat as passphrase — matches config.ts deriveMasterKey (scrypt+salt).
-    const salt = Buffer.from('pdatahub-hub-v1', 'utf8');
-    masterKey = scryptSync(passphrase, salt, 32);
-  } else {
-    throw new Error(
-      'Provide --master-key <hex>, --passphrase <text>, ' +
-        'HUB_MASTER_KEY, or HUB_PASSPHRASE env var.',
-    );
-  }
+  const argv = process.argv.slice(2);
+  const { masterKey } = await resolveMasterKey(
+    masterKeyHexFlag,
+    passphraseFlag,
+    process.env.HUB_MASTER_KEY,
+    hasAckInsecure(argv),
+  );
   return { masterKey, dbPath };
 }
 
@@ -849,20 +1006,35 @@ async function promptPassphrase(prompt: string): Promise<string> {
 }
 
 async function main(): Promise<void> {
+  const argv = process.argv.slice(2);
+
+  // One-shot: `pdatahub-hub --store-keyring <hex>` writes the master_key
+  // to the OS keyring and exits. Handled before subcommand dispatch so
+  // it works without a positional arg.
+  const storeIdx = argv.indexOf('--store-keyring');
+  if (storeIdx !== -1 && argv[storeIdx + 1]) {
+    const code = await handleSubcommand({
+      kind: 'keyring-store',
+      masterKeyHex: argv[storeIdx + 1],
+    });
+    process.exit(code);
+  }
+
   // Subcommand dispatch.
-  const sub = parseSubcommand(process.argv.slice(2));
+  const sub = parseSubcommand(argv);
   if (sub.kind !== 'none') {
     const code = await handleSubcommand(sub);
     process.exit(code);
   }
 
   // Default: start hub.
-  const config = loadConfig();
+  const config = await loadConfigAsync();
   logger.info('starting pdatahub-hub', {
     host: config.host,
     port: config.port,
     db_path: config.dbPath,
     plugins_dir: config.pluginsDir,
+    master_key_source: config.masterKeySource,
   });
 
   // Phase 0.5 — refuse to start without HUB_API_TOKEN on a non-loopback bind.

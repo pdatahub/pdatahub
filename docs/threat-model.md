@@ -385,7 +385,7 @@ Android approval is per-**plugin call** (via `pdatahub-hub → POST /v1/plugins/
 
 | # | Mitigation | Effect | Effort |
 |---|-----------|--------|--------|
-| 1 | **master_key в system keyring** (Linux Secret Service via libsecret / macOS Keychain / Windows DPAPI) instead of CLI args | `master_key` no longer readable from `/proc/<pid>/cmdline` — attacker needs additional local privilege escalation | Medium (3-5 days, all platforms) |
+| 1 | **master_key в system keyring** (Linux Secret Service via libsecret / macOS Keychain / Windows DPAPI) instead of CLI args | `master_key` no longer readable from `/proc/<pid>/cmdline` — attacker needs additional local privilege escalation | Medium (3-5 days, all platforms) — **DONE 2026-09-09** |
 | 2 | **TPM-backed key sealing** (Linux: tpm2-tss, Windows: TPM, macOS: Secure Enclave) | `master_key` cryptographically bound to hardware — can't be exfiltrated even with root | Hard (1-2 weeks, platform-specific) |
 | 3 | **Refresh token rotation on every use** (Google's `prompt=consent` returns rotated refresh_token) | Each refresh invalidates old refresh_token — limits window if extracted | Easy (config flag, 1 day) |
 | 4 | **Refresh token bound to client fingerprint** (RFC 8252 §8.1) | Refresh_token only works from same IP/UA fingerprint — extracted token unusable elsewhere | Medium (Google-specific, 3 days) |
@@ -396,7 +396,7 @@ Android approval is per-**plugin call** (via `pdatahub-hub → POST /v1/plugins/
 
 **Minimum viable hardening for v0.3.0 (priority order):**
 
-1. **#1 master_key в system keyring** — single biggest win. Removes the trivial `/proc/<pid>/cmdline` exfiltration. Attacker now needs root + ability to call keyring APIs.
+1. **#1 master_key в system keyring** — single biggest win. Removes the trivial `/proc/<pid>/cmdline` exfiltration. Attacker now needs root + ability to call keyring APIs. **IMPLEMENTED 2026-09-09.**
 2. **#7 Audit log of every vault decryption** — detects if attacker tries to use hub-core itself with stolen key. Streams to Android live.
 3. **#3 Refresh token rotation** — limits persistence window if exfiltrated.
 
@@ -407,7 +407,7 @@ Android approval is per-**plugin call** (via `pdatahub-hub → POST /v1/plugins/
 - Regularly audit `https://myaccount.google.com/permissions` and revoke plugins that are no longer needed.
 - Rotate master_key periodically (manual: backup → restore with new key → re-authorize all plugins). Not currently automated.
 
-**Status:** Accepted residual risk in v0.x. The user explicitly accepts this trade-off when using the MVP. Mitigation #1, #7, #3 are scheduled for v0.3.0.
+**Status:** Accepted residual risk in v0.x. The user explicitly accepts this trade-off when using the MVP. **Mitigation #1 (keyring) is implemented (2026-09-09)**; mitigation #2 (audit log of vault decryptions) and #3 (refresh token rotation) are scheduled for v0.3.0.
 
 ## Out of scope (current limitations)
 
@@ -425,7 +425,7 @@ These are **accepted residual risks** in v0.x. We are explicit about them so use
 | **Federation: no perfect forward secrecy** — Ed25519 doesn't ratchet. | Per-call phone approval is the backstop. | v3.1 (`key_epoch`) |
 | **Cloud v3: cross-tenant log mining** — operator can correlate logs across users on shared infra. | Separate VMs per tenant; audit log kept on the VM, not centralized. | Cloud v3.1 (per-tenant encryption) |
 | **Local-attacker bypass of audit log** — process-level attacker can `DROP TABLE audit_log`. | Rely on host security (full-disk encryption, screen lock, no shared laptops). | v4 (TPM attestation) |
-| **T-PERSISTENT-001: Refresh token extraction after laptop compromise** — `master_key` in process args (`/proc/<pid>/cmdline` world-readable) + vault on disk = offline decrypt of refresh_tokens, indefinite bypass of Android approval. | Disk encryption (out of scope); user accepts this trade-off for MVP. | v0.3.0 (master_key в system keyring) |
+| **T-PERSISTENT-001: Refresh token extraction after laptop compromise** — `master_key` in process args (`/proc/<pid>/cmdline` world-readable) + vault on disk = offline decrypt of refresh_tokens, indefinite bypass of Android approval. | Disk encryption (out of scope); user accepts this trade-off for MVP. | **v0.3.0 — IMPLEMENTED (mitigation #1: master_key in OS keyring; #2 and #3 ship separately)** |
 
 ## Future hardening
 
@@ -433,7 +433,7 @@ These are **accepted residual risks** in v0.x. We are explicit about them so use
 |-----------|------|------------------|
 | **Hardware Security Module (HSM) for master key** | v4 | A5 (compromised laptop) loses master key access |
 | **TPM-backed hub attestation** | v4 | A5 cannot tamper with audit log or token vault unnoticed |
-| **master_key в system keyring** (Linux Secret Service / macOS Keychain / Windows DPAPI) | v0.3.0 | T-PERSISTENT-001 — removes trivial `/proc/<pid>/cmdline` exfiltration |
+| **master_key в system keyring** (Linux Secret Service / macOS Keychain / Windows DPAPI) | **v0.3.0 — IMPLEMENTED (2026-09-09)** | T-PERSISTENT-001 — removes trivial `/proc/<pid>/cmdline` exfiltration |
 | **Refresh token rotation on every use** (`prompt=consent` flag) | v0.3.0 | T-PERSISTENT-001 — limits persistence window if extracted |
 | **Audit log of every vault decryption** (streamed to Android live) | v0.3.0 | T-PERSISTENT-001 — detects post-extraction re-use via hub-core |
 | **OAuth step-up auth for high-risk scopes** | v3 | A2 (malicious agent) needs extra verification for `calendar:write`, `mail:send`, etc. |
@@ -445,6 +445,21 @@ These are **accepted residual risks** in v0.x. We are explicit about them so use
 | **V8 isolate plugin isolation** | v4 | A1 cannot escape subprocess sandbox via V8 bug |
 
 ## Audit history
+
+### T-PERSISTENT-001 mitigation #1 — master_key in OS keyring (2026-09-09)
+
+Implemented per the v0.3.0 roadmap. Single biggest win for T-PERSISTENT-001 — removes the trivial `/proc/<pid>/cmdline` exfiltration vector.
+
+- **Storage backend**: cross-platform via `@napi-rs/keyring` (Rust-based, active maintenance). Linux Secret Service / macOS Keychain / Windows DPAPI. No new native build on developer machines — prebuilds published for all major targets.
+- **API**: new `src/keyring.ts` exposes `getMasterKey` / `setMasterKey` / `hasMasterKey` / `deleteMasterKey` with a swappable backend interface for testing. 24 new tests with mocked backend — no real keyring required in CI.
+- **Resolution priority** (`src/config.ts`): priority 1-3 (CLI arg / env / passphrase) emit a one-shot `T-PERSISTENT-001` warning to stderr at every startup; priority 4 (system keyring) is silent; priority 5 (interactive prompt) deferred. Suppress the warning with `--ack-insecure-master-key`.
+- **Migration path**: `pdatahub-hub --store-keyring <hex>` writes to the OS keyring; subsequent `pdatahub-hub` (no flags) reads it back. `pdatahub-hub keyring show|clear` subcommands for management.
+- **Graceful degradation**: if `@napi-rs/keyring` fails to load (no libsecret, no daemon, sandbox without IPC), the hub logs a one-time warning and falls back to the legacy CLI/env paths. NEVER crashes on startup.
+- **Cross-platform**: builds verified on Linux. macOS / Windows paths are untested in this codebase's CI (no runners) but the library is documented as cross-platform by upstream.
+- **Tests**: 24 new tests in `tests/keyring.test.ts`. Full hub-core suite: 395 total, 385 pass (10 pre-existing failures in `lifecycle-rpc` and `federation-adversarial` unrelated to this change — see issue tracker).
+- **Backward compat**: existing `--master-key` / `--passphrase` / `HUB_MASTER_KEY` users see the same boot sequence plus a single stderr warning. Vault format unchanged.
+
+Mitigations #2 (audit log of vault decryptions) and #3 (refresh token rotation) ship in separate commits.
 
 ### Federation v2 design — Momus round 1 (2026-09-07)
 
