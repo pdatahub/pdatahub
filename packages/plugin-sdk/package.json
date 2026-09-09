@@ -1,6 +1,6 @@
 {
   "name": "@pdatahub/plugin-sdk",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "SDK for writing pdatahub plugins in TypeScript",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

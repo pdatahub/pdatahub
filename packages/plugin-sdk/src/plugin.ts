@@ -125,6 +125,20 @@ export abstract class Plugin implements PluginLifecycle {
   protected logger: Logger | undefined;
 
   /**
+   * Stats tracked by the default lifecycle hooks (v2.1). The default
+   * `health()` exposes these so operators get visibility into plugin
+   * runtime behavior without writing any code. Plugins that need
+   * richer metrics (errors, latency p99, etc.) override `health()` and
+   * `onToolResult()` directly — the defaults are intentionally minimal.
+   *
+   * `startedAt` is captured at instance construction time so tests can
+   * monkey-patch `Date.now` for deterministic uptime values.
+   */
+  protected readonly startedAt: number = Date.now();
+  private callCount = 0;
+  private lastCallAt: number | null = null;
+
+  /**
    * Override to handle OAuth code exchange.
    *
    * Default implementation throws. Override to:
@@ -179,10 +193,14 @@ export abstract class Plugin implements PluginLifecycle {
   /**
    * Lifecycle hook: called after each successful tool invocation.
    *
-   * Default: no-op.
+   * Default (v2.1): increment per-plugin call counters and update
+   * `lastCallAt`. Plugins that need richer metrics (errors, latency,
+   * per-tool breakdown) override this hook and call `super.onToolResult`
+   * to keep the base counters.
    */
   async onToolResult(_name: string, _result: unknown): Promise<void> {
-    // Default: no-op
+    this.callCount += 1;
+    this.lastCallAt = Date.now();
   }
 
   // v2 lifecycle hooks — all no-ops by default. Subclasses override.
@@ -198,8 +216,29 @@ export abstract class Plugin implements PluginLifecycle {
   async onDeactivate(): Promise<void> {
     // Default: no-op
   }
-  async health(): Promise<{ status: 'healthy' }> {
-    return { status: 'healthy' };
+  /**
+   * Default (v2.1) `health()` probe — exposes uptime + call counts so
+   * the Hub's 5-min health monitor gets useful diagnostics without
+   * plugin code. Subclasses can extend the returned object (e.g.,
+   * error rate, queue depth) by calling `super.health()` first.
+   *
+   * `status` is always `'healthy'` in the default. Override this hook
+   * to report `'degraded'` (e.g., when downstream API is failing) or
+   * `'unhealthy'` (e.g., required dependency unreachable).
+   */
+  async health(): Promise<{
+    status: 'healthy' | 'degraded' | 'unhealthy';
+    message?: string;
+    uptime_ms: number;
+    call_count: number;
+    last_call_at: number | null;
+  }> {
+    return {
+      status: 'healthy',
+      uptime_ms: Date.now() - this.startedAt,
+      call_count: this.callCount,
+      last_call_at: this.lastCallAt,
+    };
   }
 
   /**

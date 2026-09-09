@@ -65,7 +65,68 @@ describe('Plugin lifecycle (default no-ops)', () => {
     await expect(p.onUninstall()).resolves.toBeUndefined();
     await expect(p.onActivate()).resolves.toBeUndefined();
     await expect(p.onDeactivate()).resolves.toBeUndefined();
-    await expect(p.health()).resolves.toEqual({ status: 'healthy' });
+    // Default health() exposes uptime + call counters (v2.1 stats).
+    const h = await p.health();
+    expect(h.status).toBe('healthy');
+    expect(h.uptime_ms).toBeGreaterThanOrEqual(0);
+    expect(h.call_count).toBe(0);
+    expect(h.last_call_at).toBeNull();
+  });
+
+  it('default health() returns v2.1 stats fields with initial values', async () => {
+    class Stats extends Plugin {
+      name = 's';
+      version = '0.0.1';
+    }
+    const p = new Stats();
+    const h = await p.health();
+    expect(h).toMatchObject({
+      status: 'healthy',
+      uptime_ms: expect.any(Number),
+      call_count: 0,
+      last_call_at: null,
+    });
+  });
+
+  it('default onToolResult() increments call_count + sets last_call_at', async () => {
+    class Tracked extends Plugin {
+      name = 't';
+      version = '0.0.1';
+    }
+    const p = new Tracked();
+    expect((await p.health()).call_count).toBe(0);
+    expect((await p.health()).last_call_at).toBeNull();
+
+    const before = Date.now();
+    await p.onToolResult('someTool', { hello: 'world' });
+    const after = Date.now();
+
+    const h = await p.health();
+    expect(h.call_count).toBe(1);
+    expect(h.last_call_at).not.toBeNull();
+    expect(h.last_call_at!).toBeGreaterThanOrEqual(before);
+    expect(h.last_call_at!).toBeLessThanOrEqual(after);
+
+    // Second call increments again.
+    await p.onToolResult('otherTool', null);
+    expect((await p.health()).call_count).toBe(2);
+  });
+
+  it('startedAt is captured at instance construction, not class definition', async () => {
+    class P1 extends Plugin {
+      name = 'p1';
+      version = '0.0.1';
+    }
+    class P2 extends Plugin {
+      name = 'p2';
+      version = '0.0.1';
+    }
+    const a = new P1();
+    await new Promise<void>((r) => setTimeout(r, 5));
+    const b = new P2();
+    expect((await b.health()).uptime_ms).toBeLessThanOrEqual(
+      (await a.health()).uptime_ms,
+    );
   });
 });
 

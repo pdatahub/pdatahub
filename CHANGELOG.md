@@ -3,6 +3,37 @@
 All notable changes to pdatahub are documented here. Dates are in `YYYY-MM-DD` format. Versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+## [0.2.2] — 2026-09-09
+
+### Added
+
+- **Default `health()` exposes v2.1 stats fields.** Operators get
+  visibility into plugin runtime behavior (uptime, call_count,
+  last_call_at) without writing any plugin code. Hub's 5-minute health
+  monitor now surfaces these metrics for every installed plugin.
+  Subclasses override to add richer metrics (errors, latency p99,
+  per-tool breakdown).
+- **Default `onToolResult()` increments call counters.** Previously
+  a no-op; now tracks `callCount` and `lastCallAt` per plugin. Plugins
+  overriding this hook should call `super.onToolResult(name, result)`
+  to keep the base counters.
+- **`startedAt` field on Plugin base class.** Captured at instance
+  construction time. Used by `health()` uptime calculation.
+
+### Compatibility
+
+- v0.2.1 plugins work without code changes (subclasses that override
+  `health()` or `onToolResult()` keep their overrides).
+- TypeScript: `health()` return type widens with optional fields. No
+  existing code breaks.
+
+### Tests
+
+- 149 → 152 passing (+3).
+  - Default `health()` returns v2.1 stats fields with initial values
+  - Default `onToolResult()` increments `call_count` + sets `last_call_at`
+  - `startedAt` captured per-instance (verified via uptime ordering)
+
 ## [0.2.1] — 2026-09-09
 
 ### Changed
