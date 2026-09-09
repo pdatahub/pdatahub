@@ -56,7 +56,8 @@ interface JsonRpcNotification {
 }
 
 export interface ToolCallResult {
-  content: Array<{ type: 'text'; text: string }>;
+  /** Plugin's raw return value (v2 dispatch contract). */
+  data: unknown;
   isError?: boolean;
 }
 

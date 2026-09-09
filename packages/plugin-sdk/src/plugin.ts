@@ -53,8 +53,19 @@ import type {
  * The Hub invokes these via a single JSON-RPC method `plugin.lifecycle`
  * with `{ hook: 'install' | 'uninstall' | ... }`. `Plugin.dispatch()`
  * routes those calls to the matching method on the subclass instance.
+ *
+ * `onStart`/`onShutdown` are pre-existing v1 lifecycle hooks (called via
+ * the `initialize` and `shutdown` JSON-RPC methods, not `plugin.lifecycle`).
+ * They're listed here so the full lifecycle surface is documented in one
+ * place; subclass overrides are optional.
  */
 export interface PluginLifecycle {
+  /** Called once after `initialize`, before any tools/call. v1 hook. */
+  onStart?(): Promise<void>;
+  /** Called when Hub sends `shutdown` notification. v1 hook. */
+  onShutdown?(): Promise<void>;
+  /** Called after each successful tool invocation. v1 hook. */
+  onToolResult?(name: string, result: unknown): Promise<void>;
   /** Called once when the plugin is installed (after OAuth setup). */
   onInstall?(): Promise<void>;
   /** Called when the plugin is uninstalled (before cleanup). */
@@ -108,7 +119,7 @@ export abstract class Plugin implements PluginLifecycle {
   protocolVersion: 1 | 2 = 1;
 
   /** HTTP client for the current tool invocation. Set per-request by handleToolCall. */
-  protected httpClient: HttpClient | undefined;
+  public httpClient: HttpClient | undefined;
 
   /** Logger instance. Initialized in start(). */
   protected logger: Logger | undefined;
@@ -404,7 +415,7 @@ export abstract class Plugin implements PluginLifecycle {
       await this.onToolResult(name, result);
       this.logger?.info(`Tool ${name} succeeded`);
       const callResult: ToolCallResult = {
-        content: [{ type: 'text', text: JSON.stringify(result) }],
+        data: result,
       };
       return {
         jsonrpc: '2.0',

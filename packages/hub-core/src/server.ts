@@ -669,7 +669,10 @@ export class HubServer {
       });
       this.opts.approval.broadcastAudit(auditEntry);
       const response: CallToolResponse = {
-        content: result.content,
+        content:
+          result.data !== undefined
+            ? [{ type: 'text', text: JSON.stringify(result.data) }]
+            : result.content ?? [],
         ...(result.isError !== undefined ? { isError: result.isError } : {}),
       };
       this.sendJson(res, 200, response);
@@ -1034,10 +1037,40 @@ export class HubServer {
       return;
     }
     if (isRevoked(delegation)) {
+      this.opts.audit.append({
+        agent_id: agentId,
+        user_id: this.defaultUserId,
+        tool_name: toolName,
+        plugin: delegation.plugin,
+        scope: delegation.scope,
+        justification,
+        decision: 'denied',
+        grant_id: null,
+        duration_ms: Date.now() - startedAt,
+        error: 'delegation revoked',
+        delegated_by: pubkeyHeader,
+        delegated_to: null,
+        decision_federated: null,
+      });
       this.sendError(res, 403, 'delegation revoked', 'DELEGATION_REVOKED');
       return;
     }
     if (isExpired(delegation.expires_at)) {
+      this.opts.audit.append({
+        agent_id: agentId,
+        user_id: this.defaultUserId,
+        tool_name: toolName,
+        plugin: delegation.plugin,
+        scope: delegation.scope,
+        justification,
+        decision: 'denied',
+        grant_id: null,
+        duration_ms: Date.now() - startedAt,
+        error: 'delegation expired',
+        delegated_by: pubkeyHeader,
+        delegated_to: null,
+        decision_federated: null,
+      });
       this.sendError(res, 403, 'delegation expired', 'DELEGATION_EXPIRED');
       return;
     }
@@ -1234,7 +1267,10 @@ export class HubServer {
       });
       this.opts.approval.broadcastAudit(auditEntry);
       const response: CallToolResponse = {
-        content: result.content,
+        content:
+          result.data !== undefined
+            ? [{ type: 'text', text: JSON.stringify(result.data) }]
+            : result.content ?? [],
         ...(result.isError !== undefined ? { isError: result.isError } : {}),
       };
       this.sendJson(res, 200, response);
@@ -1360,6 +1396,21 @@ export class HubServer {
     }
     const delegation = matches[0]!; // ORDER BY expires_at DESC; latest wins
     if (isRevoked(delegation)) {
+      this.opts.audit.append({
+        agent_id: agentId,
+        user_id: this.defaultUserId,
+        tool_name: toolName,
+        plugin: delegation.plugin,
+        scope: delegation.scope,
+        justification,
+        decision: 'denied',
+        grant_id: null,
+        duration_ms: Date.now() - startedAt,
+        error: `delegation ${delegation.delegation_id} revoked`,
+        delegated_by: null,
+        delegated_to: delegation.peer_verify_key,
+        decision_federated: 'federated_denied',
+      });
       this.sendError(
         res,
         403,
@@ -1369,6 +1420,21 @@ export class HubServer {
       return;
     }
     if (isExpired(delegation.expires_at)) {
+      this.opts.audit.append({
+        agent_id: agentId,
+        user_id: this.defaultUserId,
+        tool_name: toolName,
+        plugin: delegation.plugin,
+        scope: delegation.scope,
+        justification,
+        decision: 'denied',
+        grant_id: null,
+        duration_ms: Date.now() - startedAt,
+        error: `delegation ${delegation.delegation_id} expired`,
+        delegated_by: null,
+        delegated_to: delegation.peer_verify_key,
+        decision_federated: 'federated_denied',
+      });
       this.sendError(
         res,
         403,

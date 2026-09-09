@@ -230,8 +230,12 @@ export interface InitializeParams {
   * they write normal tool methods returning whatever shape they want.
    */
 export interface ToolCallResult {
-  /** MCP content array (text/image/etc.). */
-  content: Array<{ type: 'text'; text: string }>;
+  /**
+   * Plugin's raw return value (v2 single-object args pattern). The Hub
+   * wraps this into MCP `content` format before forwarding to
+   * mcp-server. Tests assert against this field directly.
+   */
+  data: unknown;
   /** Set true when the tool ran but reported a logical error. */
   isError?: boolean;
 }
