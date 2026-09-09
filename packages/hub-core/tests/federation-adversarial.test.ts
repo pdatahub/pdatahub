@@ -622,3 +622,171 @@ describe('Scenario 7 — cross-hub audit consistency after success', () => {
     expect(grant?.delegated_by).toBe(h.hubB.hubIdentity.publicKeyB64());
   });
 });
+
+/* ─── Scenario 8: security rejections write audit entries ─────────────── */
+
+describe('Scenario 8 — security rejections write audit entries', () => {
+  let h: Harness;
+
+  beforeEach(async () => {
+    h = await setupHarness();
+  });
+
+  afterEach(async () => {
+    await teardownHarness(h);
+  });
+
+  async function rawSignedCall(
+    overrides: {
+      delegationId?: string;
+      requestId?: string;
+      timestamp?: string;
+      signature?: Uint8Array;
+      pubkey?: string;
+    } = {},
+  ): Promise<{ status: number; code?: string }> {
+    const body = {
+      delegation_id: overrides.delegationId ?? 'del-8b-sec',
+      tool: 'listEvents',
+      arguments: {},
+      agent_id: 'B_local_agent',
+      request_id: overrides.requestId ?? `r-${Math.random().toString(36).slice(2)}`,
+      timestamp: overrides.timestamp ?? new Date().toISOString(),
+    };
+    const canonical = JSON.stringify(body);
+    const sig =
+      overrides.signature ?? h.hubB.hubIdentity.sign(new TextEncoder().encode(canonical));
+    const res = await undiciRequest(`http://127.0.0.1:${h.hubA.port}/v1/federation/call`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-federation-pubkey': overrides.pubkey ?? h.hubB.hubIdentity.publicKeyB64(),
+        'x-federation-signature': bytesToBase64Url(sig),
+      },
+      body: canonical,
+    });
+    let code: string | undefined;
+    try {
+      code = ((await res.body.json()) as { code?: string }).code;
+    } catch {
+      /* ignore */
+    }
+    return { status: res.statusCode, code };
+  }
+
+  it('INVALID_SIGNATURE writes audit with errorCode in error field', async () => {
+    seedPair(h.hubA, h.hubB, { delegationId: 'del-8b-sec' });
+    const wrongSig = new Uint8Array(64);
+    const res = await rawSignedCall({ signature: wrongSig });
+    expect(res.status).toBe(401);
+    expect(res.code).toBe('INVALID_SIGNATURE');
+
+    await sleep(50);
+
+    const audit = h.hubA.audit.query({ user_id: 'local-user' });
+    const rows = audit.filter(
+      (e) =>
+        e.delegated_by === h.hubB.hubIdentity.publicKeyB64() &&
+        e.decision === 'denied' &&
+        e.decision_federated === 'federated_denied',
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.error).toContain('[INVALID_SIGNATURE]');
+  });
+
+  it('REPLAY writes audit with [REPLAY] errorCode', async () => {
+    seedPair(h.hubA, h.hubB, { delegationId: 'del-8b-replay' });
+    const sharedId = 'r-replay-sec';
+    const first = await rawSignedCall({ requestId: sharedId, delegationId: 'del-8b-replay' });
+    expect(first.status).toBe(200);
+    await sleep(50);
+
+    const second = await rawSignedCall({ requestId: sharedId, delegationId: 'del-8b-replay' });
+    expect(second.status).toBe(409);
+    expect(second.code).toBe('REPLAY');
+
+    await sleep(50);
+
+    const audit = h.hubA.audit.query({ user_id: 'local-user' });
+    const rows = audit.filter(
+      (e) =>
+        e.delegated_by === h.hubB.hubIdentity.publicKeyB64() &&
+        e.error?.includes('[REPLAY]'),
+    );
+    expect(rows.length).toBeGreaterThanOrEqual(1);
+    expect(rows[rows.length - 1]!.decision_federated).toBe('federated_denied');
+  });
+
+  it('CLOCK_SKEW writes audit with [CLOCK_SKEW] errorCode', async () => {
+    seedPair(h.hubA, h.hubB, { delegationId: 'del-8b-skew' });
+    const res = await rawSignedCall({
+      delegationId: 'del-8b-skew',
+      timestamp: new Date(Date.now() - 10 * 60_000).toISOString(),
+    });
+    expect(res.status).toBe(401);
+    expect(res.code).toBe('CLOCK_SKEW');
+
+    await sleep(50);
+
+    const audit = h.hubA.audit.query({ user_id: 'local-user' });
+    const rows = audit.filter((e) => e.error?.includes('[CLOCK_SKEW]'));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.decision).toBe('denied');
+    expect(rows[0]!.delegated_by).toBe(h.hubB.hubIdentity.publicKeyB64());
+  });
+
+  it('DELEGATION_NOT_FOUND writes audit with [DELEGATION_NOT_FOUND] errorCode', async () => {
+    seedPair(h.hubA, h.hubB, { delegationId: 'del-8b-real' });
+    const res = await rawSignedCall({ delegationId: 'del-8b-NONEXISTENT' });
+    expect(res.status).toBe(403);
+    expect(res.code).toBe('DELEGATION_NOT_FOUND');
+
+    await sleep(50);
+
+    const audit = h.hubA.audit.query({ user_id: 'local-user' });
+    const rows = audit.filter((e) => e.error?.includes('[DELEGATION_NOT_FOUND]'));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.decision_federated).toBe('federated_denied');
+  });
+
+  it('UNKNOWN_TOOL writes audit with [UNKNOWN_TOOL] errorCode', async () => {
+    // Bind delegation to a tool that is NOT registered locally, so the
+    // request passes TOOL_MISMATCH but fails UNKNOWN_TOOL at plugin lookup.
+    seedPair(h.hubA, h.hubB, { delegationId: 'del-8b-unk', tool: 'phantomTool' });
+
+    const body = {
+      delegation_id: 'del-8b-unk',
+      tool: 'phantomTool',
+      arguments: {},
+      agent_id: 'B_local_agent',
+      request_id: `r-unk-${Date.now()}`,
+      timestamp: new Date().toISOString(),
+    };
+    const canonical = JSON.stringify(body);
+    const sig = h.hubB.hubIdentity.sign(new TextEncoder().encode(canonical));
+    const res = await undiciRequest(`http://127.0.0.1:${h.hubA.port}/v1/federation/call`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-federation-pubkey': h.hubB.hubIdentity.publicKeyB64(),
+        'x-federation-signature': bytesToBase64Url(sig),
+      },
+      body: canonical,
+    });
+    expect(res.statusCode).toBe(404);
+    let code: string | undefined;
+    try {
+      code = ((await res.body.json()) as { code?: string }).code;
+    } catch {
+      /* ignore */
+    }
+    expect(code).toBe('UNKNOWN_TOOL');
+
+    await sleep(50);
+
+    const audit = h.hubA.audit.query({ user_id: 'local-user' });
+    const rows = audit.filter((e) => e.error?.includes('[UNKNOWN_TOOL]'));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.decision_federated).toBe('federated_denied');
+  });
+});

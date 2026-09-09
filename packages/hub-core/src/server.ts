@@ -48,6 +48,7 @@ import {
   DelegationStore,
   isExpired,
   isRevoked,
+  type DelegationGrantedRow,
   type DelegationReceivedRow,
 } from './federation/delegation.js';
 import { NonceStore } from './federation/nonces.js';
@@ -935,6 +936,14 @@ export class HubServer {
     const pubkeyHeader = this.headerStr(req.headers['x-federation-pubkey']);
     const sigHeader = this.headerStr(req.headers['x-federation-signature']);
     if (!pubkeyHeader || !sigHeader) {
+      this.writeFederationSecurityAudit({
+        errorCode: 'MISSING_FEDERATION_HEADERS',
+        errorMessage: `pubkey=${pubkeyHeader ?? 'missing'} sig=${sigHeader ? 'present' : 'missing'}`,
+        pubkeyHeader: pubkeyHeader ?? null,
+        agentId: null,
+        toolName: null,
+        startedAt,
+      });
       this.sendError(
         res,
         401,
@@ -957,6 +966,14 @@ export class HubServer {
 
     // 2. Decode verify_key from base64url.
     if (!pubkeyHeader.startsWith('ed25519:')) {
+      this.writeFederationSecurityAudit({
+        errorCode: 'INVALID_PUBKEY',
+        errorMessage: `invalid prefix: ${pubkeyHeader.slice(0, 16)}`,
+        pubkeyHeader,
+        agentId: null,
+        toolName: null,
+        startedAt,
+      });
       this.sendError(res, 401, 'invalid pubkey prefix', 'INVALID_PUBKEY');
       return;
     }
@@ -964,10 +981,26 @@ export class HubServer {
     try {
       pubkeyBytes = this.b64urlDecode(pubkeyHeader.slice('ed25519:'.length));
     } catch (err) {
+      this.writeFederationSecurityAudit({
+        errorCode: 'INVALID_PUBKEY',
+        errorMessage: `decode failed: ${(err as Error).message}`,
+        pubkeyHeader,
+        agentId: null,
+        toolName: null,
+        startedAt,
+      });
       this.sendError(res, 401, `pubkey decode: ${(err as Error).message}`, 'INVALID_PUBKEY');
       return;
     }
     if (pubkeyBytes.length !== 32) {
+      this.writeFederationSecurityAudit({
+        errorCode: 'INVALID_PUBKEY',
+        errorMessage: `wrong length: ${pubkeyBytes.length}`,
+        pubkeyHeader,
+        agentId: null,
+        toolName: null,
+        startedAt,
+      });
       this.sendError(res, 401, `pubkey wrong length (${pubkeyBytes.length})`, 'INVALID_PUBKEY');
       return;
     }
@@ -983,6 +1016,14 @@ export class HubServer {
     const args = this.recordField(bodyObj, 'arguments');
 
     if (!delegationId || !toolName || !agentId || !requestId || !timestamp) {
+      this.writeFederationSecurityAudit({
+        errorCode: 'INVALID_BODY',
+        errorMessage: `missing fields: delegation_id=${!!delegationId} tool=${!!toolName} agent_id=${!!agentId} request_id=${!!requestId} timestamp=${!!timestamp}`,
+        pubkeyHeader,
+        agentId: agentId ?? null,
+        toolName: toolName ?? null,
+        startedAt,
+      });
       this.sendError(
         res,
         400,
@@ -993,11 +1034,27 @@ export class HubServer {
     }
     const ts = Date.parse(timestamp);
     if (Number.isNaN(ts)) {
+      this.writeFederationSecurityAudit({
+        errorCode: 'INVALID_TIMESTAMP',
+        errorMessage: `unparseable: ${timestamp}`,
+        pubkeyHeader,
+        agentId,
+        toolName,
+        startedAt,
+      });
       this.sendError(res, 400, 'invalid timestamp', 'INVALID_TIMESTAMP');
       return;
     }
     const skewMs = Math.abs(Date.now() - ts);
     if (skewMs > 300_000) {
+      this.writeFederationSecurityAudit({
+        errorCode: 'CLOCK_SKEW',
+        errorMessage: `skew=${skewMs}ms window=300s`,
+        pubkeyHeader,
+        agentId,
+        toolName,
+        startedAt,
+      });
       this.sendError(res, 401, `clock skew ${skewMs}ms exceeds 300s`, 'CLOCK_SKEW');
       return;
     }
@@ -1007,15 +1064,39 @@ export class HubServer {
     try {
       sigBytes = this.b64urlDecode(sigHeader);
     } catch (err) {
+      this.writeFederationSecurityAudit({
+        errorCode: 'INVALID_SIGNATURE',
+        errorMessage: `decode failed: ${(err as Error).message}`,
+        pubkeyHeader,
+        agentId,
+        toolName,
+        startedAt,
+      });
       this.sendError(res, 401, `signature decode: ${(err as Error).message}`, 'INVALID_SIGNATURE');
       return;
     }
     if (sigBytes.length !== 64) {
+      this.writeFederationSecurityAudit({
+        errorCode: 'INVALID_SIGNATURE',
+        errorMessage: `wrong length: ${sigBytes.length}`,
+        pubkeyHeader,
+        agentId,
+        toolName,
+        startedAt,
+      });
       this.sendError(res, 401, 'signature wrong length', 'INVALID_SIGNATURE');
       return;
     }
     const bodyBytes = new TextEncoder().encode(raw);
     if (!HubIdentity.verify(bodyBytes, sigBytes, pubkeyBytes)) {
+      this.writeFederationSecurityAudit({
+        errorCode: 'INVALID_SIGNATURE',
+        errorMessage: 'signature mismatch (verify failed)',
+        pubkeyHeader,
+        agentId,
+        toolName,
+        startedAt,
+      });
       this.sendError(res, 401, 'signature mismatch', 'INVALID_SIGNATURE');
       return;
     }
@@ -1023,6 +1104,14 @@ export class HubServer {
     // 5. Nonce replay dedup — record before delegation lookup so a
     // replay of an already-rejected request also bounces.
     if (nonces.isSeenRecently(requestId)) {
+      this.writeFederationSecurityAudit({
+        errorCode: 'REPLAY',
+        errorMessage: `request_id=${requestId} seen within replay window`,
+        pubkeyHeader,
+        agentId,
+        toolName,
+        startedAt,
+      });
       this.sendError(res, 409, 'request_id already seen within replay window', 'REPLAY');
       return;
     }
@@ -1033,6 +1122,14 @@ export class HubServer {
       // No nonce record: a malformed request never consumes the
       // request_id slot, so an attacker probing for valid IDs is
       // limited only by signature checks.
+      this.writeFederationSecurityAudit({
+        errorCode: 'DELEGATION_NOT_FOUND',
+        errorMessage: `delegation_id=${delegationId}`,
+        pubkeyHeader,
+        agentId,
+        toolName,
+        startedAt,
+      });
       this.sendError(res, 403, 'unknown delegation', 'DELEGATION_NOT_FOUND');
       return;
     }
@@ -1079,10 +1176,28 @@ export class HubServer {
       // but the pubkey in the header must also match the delegation's
       // bound peer. Caught here too in case delegation.peer_verify_key
       // was tampered with after import.
+      this.writeFederationSecurityAudit({
+        errorCode: 'PEER_MISMATCH',
+        errorMessage: `pubkey=${pubkeyHeader.slice(0, 16)}... vs delegation.peer_verify_key=${delegation.peer_verify_key.slice(0, 16)}...`,
+        pubkeyHeader,
+        agentId,
+        toolName,
+        delegation,
+        startedAt,
+      });
       this.sendError(res, 403, 'X-Federation-Pubkey does not match delegation', 'PEER_MISMATCH');
       return;
     }
     if (delegation.tool !== toolName) {
+      this.writeFederationSecurityAudit({
+        errorCode: 'TOOL_MISMATCH',
+        errorMessage: `body.tool=${toolName} vs delegation.tool=${delegation.tool}`,
+        pubkeyHeader,
+        agentId,
+        toolName,
+        delegation,
+        startedAt,
+      });
       this.sendError(res, 403, 'body.tool does not match delegation', 'TOOL_MISMATCH');
       return;
     }
@@ -1115,6 +1230,15 @@ export class HubServer {
     // 8. Per-(peer, agent_id) rate limit.
     const rl = this.checkFederatedRateLimit(pubkeyHeader, agentId);
     if (rl) {
+      this.writeFederationSecurityAudit({
+        errorCode: 'RATE_LIMIT',
+        errorMessage: `retry_after=${Math.ceil(rl.retryAfterMs / 1000)}s`,
+        pubkeyHeader,
+        agentId,
+        toolName,
+        delegation,
+        startedAt,
+      });
       this.sendError(
         res,
         429,
@@ -1127,6 +1251,15 @@ export class HubServer {
     // 9. Look up the local plugin (mirrors handleCallTool).
     const plugin = this.opts.registry.getPlugin(toolName);
     if (!plugin) {
+      this.writeFederationSecurityAudit({
+        errorCode: 'UNKNOWN_TOOL',
+        errorMessage: `tool=${toolName} plugin_name=${delegation.plugin} not registered locally`,
+        pubkeyHeader,
+        agentId,
+        toolName,
+        delegation,
+        startedAt,
+      });
       this.sendError(res, 404, `unknown tool: ${toolName}`, 'UNKNOWN_TOOL');
       return;
     }
@@ -1386,6 +1519,21 @@ export class HubServer {
     }
     const matches = delegations.findReceivedMatch(parsed.peerHubName, parsed.tool);
     if (matches.length === 0) {
+      this.opts.audit.append({
+        agent_id: agentId,
+        user_id: this.defaultUserId,
+        tool_name: parsed.tool,
+        plugin: 'federation',
+        scope: 'federation:external',
+        justification,
+        decision: 'denied',
+        grant_id: null,
+        duration_ms: Date.now() - startedAt,
+        error: `[DELEGATION_NOT_FOUND] peer=${parsed.peerHubName} tool=${parsed.tool}`,
+        delegated_by: null,
+        delegated_to: null,
+        decision_federated: 'federated_denied',
+      });
       this.sendError(
         res,
         404,
@@ -1629,6 +1777,47 @@ export class HubServer {
       delegated_by: null,
       delegated_to: opts.delegation.peer_verify_key,
       decision_federated: opts.decisionFederated,
+    });
+  }
+
+  /**
+   * Append an audit entry for an inbound federation security check
+   * failure (signature mismatch, replay, clock skew, etc.). Logs on A's
+   * side with `decision_federated = 'federated_denied'` so the user's
+   * audit log surfaces probing/replay attempts against the Hub.
+   *
+   * For failures before agent_id / tool_name are extracted from the
+   * signed body, we use placeholder values ('unknown-attacker', '(unknown)')
+   * so the row still gets written and the attempt is visible.
+   *
+   * `pubkeyHeader` is whatever X-Federation-Pubkey we extracted (may
+   * be null for MISSING_FEDERATION_HEADERS / INVALID_PUBKEY). When a
+   * delegation is already loaded (post-lookup rejections), pass it so
+   * the row carries plugin/scope for forensics.
+   */
+  private writeFederationSecurityAudit(opts: {
+    errorCode: string;
+    errorMessage: string;
+    pubkeyHeader: string | null;
+    agentId: string | null;
+    toolName: string | null;
+    delegation?: DelegationGrantedRow;
+    startedAt: number;
+  }): AuditEntry {
+    return this.opts.audit.append({
+      agent_id: opts.agentId ?? 'unknown-attacker',
+      user_id: this.defaultUserId,
+      tool_name: opts.toolName ?? '(unknown)',
+      plugin: opts.delegation?.plugin ?? 'federation',
+      scope: opts.delegation?.scope ?? 'federation:external',
+      justification: null,
+      decision: 'denied',
+      grant_id: null,
+      duration_ms: Date.now() - opts.startedAt,
+      error: `[${opts.errorCode}] ${opts.errorMessage}`,
+      delegated_by: opts.pubkeyHeader,
+      delegated_to: null,
+      decision_federated: 'federated_denied',
     });
   }
 
