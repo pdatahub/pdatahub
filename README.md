@@ -2,7 +2,11 @@
 
 [![CI](https://github.com/pdatahub/pdatahub/actions/workflows/ci.yml/badge.svg)](https://github.com/pdatahub/pdatahub/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
-[![Version: v0.1.0](https://img.shields.io/badge/version-v0.1.0-orange.svg)](./CHANGELOG.md)
+[![Version: v0.3.0](https://img.shields.io/badge/version-v0.3.0-blue.svg)](./CHANGELOG.md)
+[![Node 20+](https://img.shields.io/badge/node-20%2B-green)](https://nodejs.org)
+[![TypeScript](https://img.shields.io/badge/typescript-5.x-3178C6)](https://www.typescriptlang.org)
+[![Tests](https://img.shields.io/badge/tests-697%2F697-brightgreen)](./CHANGELOG.md)
+[![Self-hosted](https://img.shields.io/badge/self--hosted-yes-purple)](./docs/self-hosting.md)
 
 > Privacy-first personal data platform with per-action approval, time-bounded grants, auditable AI-agent access, and Federation v2 (cross-user delegation).
 
