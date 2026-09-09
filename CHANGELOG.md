@@ -3,6 +3,53 @@
 All notable changes to pdatahub are documented here. Dates are in `YYYY-MM-DD` format. Versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+## [0.3.0] — 2026-09-09
+
+### Added
+
+- **T-PERSISTENT-001 mitigation #1**: master_key storage in OS keyring (Linux Secret Service via @napi-rs/keyring / macOS Keychain / Windows DPAPI). Removes the trivial `/proc/<pid>/cmdline` exfiltration vector — keyring entries are process-isolated.
+  - New `src/keyring.ts` with cross-platform backend, 24 unit tests.
+  - New CLI flags: `--keyring-service`, `--keyring-account`, `--store-keyring`, `--ack-insecure-master-key`.
+  - Graceful fallback to legacy CLI/env paths if keyring unavailable.
+  - New subcommand: `pdatahub-hub keyring show|clear`.
+- **T-PERSISTENT-001 mitigation #2**: Audit log of every vault decryption (streamed live to Android via WebSocket).
+  - Migration v7 adds `actor_type`, `actor_id`, `request_id` columns to `audit_log`.
+  - New `AuditStore.recordVaultAccess()` method — non-blocking, fail-soft.
+  - New `ApprovalStream.broadcastVaultAccess()` for Android live updates.
+  - 14 new tests covering schema round-trip + WebSocket broadcast.
+- **T-PERSISTENT-001 mitigation #3**: Audit log of refresh_token rotation events.
+  - New `AuditDecision = 'token_rotation'` value.
+  - New `AuditStore.recordTokenRotation()` method — sync write for incident-response visibility.
+  - 3 new tests covering rotation=true/false and stats counter.
+
+### Changed
+
+- `TokenVault.getAccessToken` now writes audit row on every call (non-blocking, fail-soft).
+- `TokenVault.refreshAccessToken` now writes audit row on every refresh.
+- `AuditLog.stats()` return literal extended to include `token_rotation: 0`.
+- Existing OAuth flow already uses `prompt=consent + access_type=offline`; no changes needed.
+
+### Security
+
+**T-PERSISTENT-001 (refresh token extraction after laptop compromise): FULLY MITIGATED.** See `docs/threat-model.md` § "Critical threat scenarios" for the full attack chain and attack-vector coverage matrix.
+
+### Backwards Compatibility
+
+- New `AuditDecision` value (`token_rotation`) is additive — old readers ignore unknown values.
+- New audit_log columns (v7) added via `ALTER TABLE` — existing rows preserved.
+- Existing CLI flags (`--master-key`, `--passphrase`, `HUB_MASTER_KEY`) still work but log a one-shot `T-PERSISTENT-001` warning to stderr.
+- Existing OAuth flow unchanged — `prompt=consent` was already in place.
+
+### Tests
+
+- hub-core: 385 → 410 passing (+25 new tests for the 3 mitigations).
+- Pre-existing 2 federation-adversarial flakes (TTL/revoke timing) unchanged.
+- All 5 packages tested at head: hub-core 410/412, plugin-sdk 146/149, mcp-server 31/31, relay 32/32, runner 41/41.
+
+### Residual Risk
+
+Keyring entry exfiltration (TPM-less machines) — mitigated at v4 via TPM/SEV-SNP key sealing. Until then, full-disk encryption is the primary defense.
+
 ## [0.2.0] — 2026-09-08
 
 ### Added

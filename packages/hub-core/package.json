@@ -1,6 +1,6 @@
 {
   "name": "@pdatahub/hub-core",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "description": "pdatahub Hub core — approval engine, token vault, audit log, plugin subprocess manager (Node.js, replaces Kotlin McpHttpServer/PluginManager)",
   "type": "module",
   "main": "dist/index.js",
