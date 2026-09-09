@@ -19,7 +19,7 @@
  */
 
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from 'node:http';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { existsSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { request as undiciRequest } from 'undici';
@@ -43,11 +43,13 @@ import type {
   PluginReauthNotification,
   ToolDescriptor,
 } from './types.js';
-import { HubIdentity } from './federation/identity.js';
+import { HubIdentity, bytesToSpacedHex } from './federation/identity.js';
 import {
   DelegationStore,
   isExpired,
   isRevoked,
+  signDelegation,
+  type DelegationBlobV1Body,
   type DelegationGrantedRow,
   type DelegationReceivedRow,
 } from './federation/delegation.js';
@@ -95,6 +97,11 @@ export const routeAuth: RouteAuth[] = [
   // `ed25519` routes through; the actual signature check happens in the
   // handler where we have access to the raw body.
   { method: 'POST', path: '/v1/federation/call', auth: 'ed25519' },
+  // Phase 4 — A-side delegation management. Bearer-authenticated; the
+  // owner of the hub creates, lists, and revokes delegations.
+  { method: 'POST', path: '/v1/federation/delegate', auth: 'bearer' },
+  { method: 'GET', path: '/v1/federation/delegations', auth: 'bearer' },
+  { method: 'POST', path: '/v1/federation/delegations/:id/revoke', auth: 'bearer' },
 ];
 
 /**
@@ -445,6 +452,23 @@ export class HubServer {
       // /v1/federation/call. A-side ed25519 auth happens on A.
       if (req.method === 'POST' && url.pathname === '/v1/federation/invoke') {
         await this.handleFederationInvoke(req, res);
+        return;
+      }
+
+      // Phase 4 — A-side delegation management (bearer-authenticated).
+      if (req.method === 'POST' && url.pathname === '/v1/federation/delegate') {
+        await this.handleCreateDelegation(req, res);
+        return;
+      }
+      if (req.method === 'GET' && url.pathname === '/v1/federation/delegations') {
+        await this.handleListDelegations(res);
+        return;
+      }
+      const delegationRevokeMatch = url.pathname.match(
+        /^\/v1\/federation\/delegations\/([^/]+)\/revoke$/,
+      );
+      if (req.method === 'POST' && delegationRevokeMatch) {
+        await this.handleRevokeDelegation(res, decodeURIComponent(delegationRevokeMatch[1]!));
         return;
       }
 
@@ -1741,6 +1765,205 @@ export class HubServer {
     const tool = rest.slice(sep + 2);
     if (peerHubName.length === 0 || tool.length === 0) return null;
     return { peerHubName, tool };
+  }
+
+  /**
+   * Phase 4 — `POST /v1/federation/delegate` handler. A creates a
+   * delegation for a peer hub B: validates scope matches the local
+   * plugin manifest (Momus C5), signs a canonical-JSON blob with A's
+   * signing_key, persists it in `delegations`, and returns the
+   * base64url-encoded blob for B to import via `accept-delegation`.
+   */
+  private async handleCreateDelegation(
+    req: IncomingMessage,
+    res: ServerResponse,
+  ): Promise<void> {
+    let body: Record<string, unknown>;
+    try {
+      body = (await this.readBody<Record<string, unknown>>(req)) ?? {};
+    } catch (err) {
+      this.sendError(res, 400, (err as Error).message, 'INVALID_BODY');
+      return;
+    }
+
+    const peerVerifyKey = this.stringField(body, 'peer_verify_key');
+    const pluginName = this.stringField(body, 'plugin');
+    const toolName = this.stringField(body, 'tool');
+    const scope = this.stringField(body, 'scope');
+    const expiresAt = this.stringField(body, 'expires_at');
+    const peerHubName = this.stringField(body, 'peer_hub_name');
+
+    if (!peerVerifyKey || !pluginName || !toolName || !scope || !expiresAt) {
+      this.sendError(
+        res,
+        400,
+        'body must include peer_verify_key, plugin, tool, scope, expires_at',
+        'INVALID_BODY',
+      );
+      return;
+    }
+    if (!peerVerifyKey.startsWith('ed25519:')) {
+      this.sendError(res, 400, 'peer_verify_key must start with ed25519:', 'INVALID_PUBKEY');
+      return;
+    }
+    const expiresTs = Date.parse(expiresAt);
+    if (Number.isNaN(expiresTs)) {
+      this.sendError(res, 400, 'invalid expires_at (not ISO 8601)', 'INVALID_TIMESTAMP');
+      return;
+    }
+    if (expiresTs <= Date.now()) {
+      this.sendError(res, 400, 'expires_at must be in the future', 'EXPIRED_AT_IN_PAST');
+      return;
+    }
+
+    // Lookup plugin via tool name (registry is keyed by tool).
+    const pluginProcess = this.opts.registry.getPlugin(toolName);
+    if (!pluginProcess) {
+      this.sendError(res, 404, `unknown tool (plugin not loaded): ${toolName}`, 'UNKNOWN_TOOL');
+      return;
+    }
+    const pluginInfo = pluginProcess.getInfo();
+    if (pluginInfo.name !== pluginName) {
+      this.sendError(
+        res,
+        400,
+        `plugin mismatch: tool=${toolName} belongs to "${pluginInfo.name}", not "${pluginName}"`,
+        'PLUGIN_MISMATCH',
+      );
+      return;
+    }
+    const toolDef = pluginInfo.tools.find((t) => t.name === toolName);
+    if (!toolDef) {
+      this.sendError(res, 404, `tool "${toolName}" not in plugin "${pluginName}"`, 'UNKNOWN_TOOL');
+      return;
+    }
+    // Momus C5 — scope MUST match the plugin manifest. Prevents the user
+    // from granting broader scope than the tool declares (e.g., granting
+    // "calendar:write" for a tool that only declares "calendar:read").
+    if (toolDef.scope !== scope) {
+      this.sendError(
+        res,
+        400,
+        `scope mismatch: tool declares "${toolDef.scope}", request declared "${scope}"`,
+        'SCOPE_MISMATCH',
+      );
+      return;
+    }
+
+    if (!HubIdentity.exists(this.opts.db)) {
+      this.sendError(res, 503, 'Hub identity not initialized', 'IDENTITY_NOT_INITIALIZED');
+      return;
+    }
+    const identity = HubIdentity.load(this.opts.db, this.opts.config.masterKey);
+
+    const delegationId = randomUUID();
+    const peerKeyBytes = (() => {
+      const b64 = peerVerifyKey.slice('ed25519:'.length);
+      const padded = b64 + '='.repeat((4 - (b64.length % 4)) % 4);
+      return new Uint8Array(
+        Buffer.from(padded.replace(/-/g, '+').replace(/_/g, '/'), 'base64'),
+      );
+    })();
+
+    const blobBody: DelegationBlobV1Body = {
+      version: 1,
+      delegation_id: delegationId,
+      issuer: {
+        hub_name: identity.hubName,
+        verify_key: identity.publicKeyB64(),
+        fingerprint: identity.fingerprintHex(),
+        magic_dns: identity.magicDns ?? '',
+      },
+      subject: {
+        verify_key: peerVerifyKey,
+        fingerprint: bytesToSpacedHex(peerKeyBytes, 8),
+      },
+      delegation: {
+        plugin: pluginName,
+        tool: toolName,
+        scope,
+        input_schema: toolDef.inputSchema ?? null,
+        expires_at: expiresAt,
+      },
+    };
+
+    const signature = signDelegation(identity, blobBody);
+    const fullBlob = { ...blobBody, signature };
+    const blobJson = JSON.stringify(fullBlob);
+    const blobBase64 = Buffer.from(blobJson)
+      .toString('base64')
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_')
+      .replace(/=+$/g, '');
+
+    if (!this.opts.delegations) {
+      this.sendError(res, 503, 'federation not initialized', 'FEDERATION_NOT_INITIALIZED');
+      return;
+    }
+    this.opts.delegations.createGranted({
+      delegation_id: delegationId,
+      peer_verify_key: peerVerifyKey,
+      peer_hub_name: peerHubName ?? null,
+      plugin: pluginName,
+      tool: toolName,
+      scope,
+      expires_at: expiresAt,
+      signature: Buffer.from(signature, 'base64url'),
+    });
+
+    this.sendJson(res, 200, {
+      delegation_id: delegationId,
+      blob: blobBase64,
+      issuer: {
+        hub_name: identity.hubName,
+        verify_key: identity.publicKeyB64(),
+        fingerprint: identity.fingerprintHex(),
+        magic_dns: identity.magicDns,
+      },
+    });
+  }
+
+  /**
+   * Phase 4 — `GET /v1/federation/delegations` handler. Lists all
+   * delegations this hub has granted (including revoked/expired so the
+   * user can see history). Sorted by created_at DESC.
+   */
+  private handleListDelegations(res: ServerResponse): void {
+    if (!this.opts.delegations) {
+      this.sendJson(res, 200, { delegations: [] });
+      return;
+    }
+    const rows = this.opts.delegations.listGranted();
+    const delegations = rows.map((row) => ({
+      delegation_id: row.delegation_id,
+      peer_verify_key: row.peer_verify_key,
+      peer_hub_name: row.peer_hub_name,
+      plugin: row.plugin,
+      tool: row.tool,
+      scope: row.scope,
+      expires_at: row.expires_at,
+      revoked: row.revoked,
+      created_at: row.created_at,
+    }));
+    this.sendJson(res, 200, { delegations });
+  }
+
+  /**
+   * Phase 4 — `POST /v1/federation/delegations/:id/revoke` handler.
+   * Sets `revoked = 1` on the matching row. Idempotent — revoking an
+   * already-revoked delegation returns 200 with revoked=true.
+   */
+  private handleRevokeDelegation(res: ServerResponse, delegationId: string): void {
+    if (!this.opts.delegations) {
+      this.sendError(res, 503, 'federation not initialized', 'FEDERATION_NOT_INITIALIZED');
+      return;
+    }
+    const ok = this.opts.delegations.revokeGranted(delegationId);
+    if (ok) {
+      this.sendJson(res, 200, { revoked: delegationId });
+    } else {
+      this.sendError(res, 404, `delegation not found: ${delegationId}`, 'DELEGATION_NOT_FOUND');
+    }
   }
 
   /**

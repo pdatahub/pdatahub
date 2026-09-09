@@ -107,7 +107,8 @@ function bytesToBase64Url(bytes: Uint8Array): string {
     .replace(/=+$/g, '');
 }
 
-function bytesToSpacedHex(bytes: Uint8Array, byteCount: number): string {
+/** Format the first `byteCount` bytes as uppercase hex pairs separated by spaces. */
+export function bytesToSpacedHex(bytes: Uint8Array, byteCount: number): string {
   const limit = Math.min(byteCount, bytes.length);
   const pairs: string[] = [];
   for (let i = 0; i < limit; i++) {
