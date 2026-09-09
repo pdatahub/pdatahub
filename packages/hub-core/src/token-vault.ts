@@ -407,6 +407,7 @@ export class TokenVault {
     const json = (await res.body.json()) as RefreshResponse;
     const expiresAt = new Date(Date.now() + json.expires_in * 1000).toISOString();
     const scope = json.scope ?? existing.scope;
+    const rotated = !!json.refresh_token;
 
     // Pass existing.refresh_token when new one is absent so store() preserves it.
     this.store({
@@ -416,6 +417,22 @@ export class TokenVault {
       expires_at: expiresAt,
       scope,
     });
+
+    if (this.auditLog) {
+      try {
+        this.auditLog.recordTokenRotation({
+          plugin,
+          rotated,
+          expires_at: expiresAt,
+          scope,
+        });
+      } catch (err) {
+        logger.warn('token rotation audit record threw', {
+          plugin,
+          error: (err as Error).message,
+        });
+      }
+    }
 
     logger.info('OAuth token refreshed', {
       plugin,

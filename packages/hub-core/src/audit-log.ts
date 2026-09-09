@@ -478,6 +478,7 @@ export class AuditLog {
       revoked: 0,
       error: 0,
       vault_access: 0,
+      token_rotation: 0,
     };
     for (const row of rows) {
       result[row.decision] = row.count;
@@ -527,6 +528,44 @@ export class AuditLog {
       .prepare(`DELETE FROM audit_log WHERE timestamp < ?`)
       .run(cutoffISO);
     return result.changes;
+  }
+
+  /**
+   * T-PERSISTENT-001 mitigation #3 — log a refresh_token rotation event.
+   *
+   * Google rotates `refresh_token` when:
+   *   - scopes change (user re-consents to expanded scope)
+   *   - the previous refresh_token has been idle for >6 months
+   *   - explicit `prompt=consent` re-auth (always rotates)
+   *
+   * When rotation happens, the OLD refresh_token is invalidated by
+   * Google. If an attacker had extracted the old refresh_token
+   * (T-PERSISTENT-001 attack), that extracted token is now useless.
+   *
+   * This audit row is written synchronously because:
+   *   - the event is rare (not every refresh rotates)
+   *   - we want the row visible immediately in `getRecent()` for
+   *     incident response queries
+   *   - the audit row is small (no token bytes — only metadata)
+   */
+  recordTokenRotation(input: {
+    plugin: string;
+    rotated: boolean;
+    expires_at: string;
+    scope: string;
+  }): AuditEntry {
+    return this.append({
+      agent_id: 'system:token-refresh',
+      user_id: 'local-user',
+      tool_name: 'refreshAccessToken',
+      plugin: input.plugin,
+      scope: input.scope,
+      justification: null,
+      decision: 'token_rotation',
+      grant_id: null,
+      duration_ms: 0,
+      ...(input.rotated ? {} : { error: 'no_rotation' }),
+    });
   }
 }
 

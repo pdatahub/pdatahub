@@ -130,7 +130,14 @@ export type AuditDecision =
    * of `error` means success. `actor_type` / `actor_id` / `request_id`
    * tell the Android UI who triggered the decrypt and for which call.
    */
-  | 'vault_access';
+  | 'vault_access'
+  /**
+   * T-PERSISTENT-001 mitigation #3 — written when Google's token
+   * endpoint returns a rotated `refresh_token`. Indicates the old
+   * refresh_token is invalidated server-side; any extracted copy
+   * (attack scenario) is now useless.
+   */
+  | 'token_rotation';
 
 export interface AuditEntry {
   /** UUID v4. */

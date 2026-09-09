@@ -230,3 +230,48 @@ describe('audit_log migration v6 — Plugin SDK v2', () => {
     expect(Object.keys(row)).toHaveLength(19);
   });
 });
+
+describe('AuditLog.recordTokenRotation', () => {
+  it('writes a row with decision="token_rotation" and no error when rotated=true', () => {
+    runMigrations(db);
+    const log = new AuditLog(db);
+    const entry = log.recordTokenRotation({
+      plugin: 'google-calendar',
+      rotated: true,
+      expires_at: '2026-09-08T13:00:00Z',
+      scope: 'calendar:read',
+    });
+    expect(entry.decision).toBe('token_rotation');
+    expect(entry.plugin).toBe('google-calendar');
+    expect(entry.scope).toBe('calendar:read');
+    expect(entry.error).toBeUndefined();
+  });
+
+  it('writes a row with error="no_rotation" when rotated=false', () => {
+    runMigrations(db);
+    const log = new AuditLog(db);
+    const entry = log.recordTokenRotation({
+      plugin: 'google-calendar',
+      rotated: false,
+      expires_at: '2026-09-08T13:00:00Z',
+      scope: 'calendar:read',
+    });
+    expect(entry.decision).toBe('token_rotation');
+    expect(entry.error).toBe('no_rotation');
+  });
+
+  it('stats() includes token_rotation counter', () => {
+    runMigrations(db);
+    const log = new AuditLog(db);
+    log.recordTokenRotation({
+      plugin: 'a', rotated: true,
+      expires_at: '2026-01-01T00:00:00Z', scope: 'x',
+    });
+    log.recordTokenRotation({
+      plugin: 'b', rotated: false,
+      expires_at: '2026-01-01T00:00:00Z', scope: 'y',
+    });
+    const stats = log.stats();
+    expect(stats.token_rotation).toBe(2);
+  });
+});
