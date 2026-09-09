@@ -601,10 +601,10 @@ describe('POST /v1/federation/invoke — B-side endpoint (Phase 5, Momus B6)', (
     expect(mockA.captured).toHaveLength(0);
   });
 
-  it('returns 404 DELEGATION_NOT_FOUND for expired peer_delegation', async () => {
-    // Same as the revoked case — `expires_at <= now` is filtered at the SQL
-    // layer. The DELEGATION_EXPIRED code is only meaningful from A's hub
-    // (Phase 3); B just sees "no active delegation for this tool".
+  it('returns 403 DELEGATION_EXPIRED for expired peer_delegation', async () => {
+    // Expired delegations are returned by findReceivedMatch so B can
+    // surface a useful 403 + federated_denied audit to the caller.
+    // (Locally-revoked rows are still filtered — those return 404.)
     seedReceivedDelegation(h, {
       peer_hub_name: 'userA',
       peer_hub_url: `http://127.0.0.1:${mockA.port}`,
@@ -616,8 +616,8 @@ describe('POST /v1/federation/invoke — B-side endpoint (Phase 5, Momus B6)', (
       arguments: {},
       agent_id: 'agent-1',
     });
-    expect(res.status).toBe(404);
-    expect((res.body as { code: string }).code).toBe('DELEGATION_NOT_FOUND');
+    expect(res.status).toBe(403);
+    expect((res.body as { code: string }).code).toBe('DELEGATION_EXPIRED');
     expect(mockA.captured).toHaveLength(0);
   });
 

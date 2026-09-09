@@ -441,22 +441,31 @@ export class DelegationStore {
   }
 
   /**
-   * Return active (not revoked, not expired) received delegations matching
-   * `(peer_hub_name, tool)`, sorted by `expires_at` DESC so Momus's
+   * Return received delegations matching `(peer_hub_name, tool)` excluding
+   * locally revoked rows, sorted by `expires_at` DESC so Momus's
    * latest-expires tie-break winner is at index 0.
+   *
+   * Filter rationale:
+   *   - `revoked = 1` excluded: B's local view says "I no longer trust this
+   *     peer". Return 404 DELEGATION_NOT_FOUND to the caller (privacy —
+   *     don't reveal delegation history).
+   *   - Expired rows INCLUDED: B's caller benefits from the informative
+   *     403 DELEGATION_EXPIRED + federated_denied audit rather than a
+   *     misleading 404. Caller learns the delegation existed but expired.
+   *   - Active-only listings (e.g. mcp-server tool descriptors) use
+   *     `listReceived()` and filter in JS.
    */
   findReceivedMatch(
     peer_hub_name: string,
     tool: string,
   ): DelegationReceivedRow[] {
-    const now = new Date().toISOString();
     return this.db
       .prepare(
         `SELECT * FROM peer_delegations
-          WHERE peer_hub_name = ? AND tool = ? AND revoked = 0 AND expires_at > ?
+          WHERE peer_hub_name = ? AND tool = ? AND revoked = 0
           ORDER BY expires_at DESC`,
       )
-      .all(peer_hub_name, tool, now) as DelegationReceivedRow[];
+      .all(peer_hub_name, tool) as DelegationReceivedRow[];
   }
 
   listReceived(): DelegationReceivedRow[] {

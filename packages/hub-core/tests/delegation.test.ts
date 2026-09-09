@@ -696,7 +696,7 @@ describe('DelegationStore — received (peer_delegations table)', () => {
     expect(row?.peer_verify_key).toBe('ed25519:peer');
   });
 
-  it('findReceivedMatch returns active matches only', () => {
+  it('findReceivedMatch excludes revoked but includes expired (handleFederationInvoke distinguishes 404 vs 403)', () => {
     store.createReceived({
       delegation_id: 'd-active-1',
       peer_verify_key: 'ed25519:peer',
@@ -709,7 +709,7 @@ describe('DelegationStore — received (peer_delegations table)', () => {
       expires_at: '2030-01-01T00:00:00Z',
       signature: Buffer.alloc(64),
     });
-    // Expired one — past expires_at.
+    // Expired one — past expires_at. Included so caller can return 403 DELEGATION_EXPIRED.
     store.createReceived({
       delegation_id: 'd-expired',
       peer_verify_key: 'ed25519:peer',
@@ -722,7 +722,7 @@ describe('DelegationStore — received (peer_delegations table)', () => {
       expires_at: '2000-01-01T00:00:00Z',
       signature: Buffer.alloc(64),
     });
-    // Revoked one — future.
+    // Revoked one — future. Excluded (B's local view: no longer trusted).
     store.createReceived({
       delegation_id: 'd-revoked',
       peer_verify_key: 'ed25519:peer',
@@ -738,8 +738,8 @@ describe('DelegationStore — received (peer_delegations table)', () => {
     store.revokeReceived('d-revoked');
 
     const matches = store.findReceivedMatch('userA', 'listEvents');
-    expect(matches).toHaveLength(1);
-    expect(matches[0]?.delegation_id).toBe('d-active-1');
+    expect(matches).toHaveLength(2);
+    expect(matches.map((m) => m.delegation_id).sort()).toEqual(['d-active-1', 'd-expired']);
   });
 
   it('findReceivedMatch sorts by latest expires_at first (Momus Q4)', () => {
