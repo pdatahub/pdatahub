@@ -44,3 +44,9 @@ local.properties
 
 # OpenCode session state (resume context after /compact)
 opencode/
+
+# AI session artifacts (not for public consumption)
+.omo/
+.debris/
+.opencode/
+.codegraph/
