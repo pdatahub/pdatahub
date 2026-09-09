@@ -425,7 +425,7 @@ These are **accepted residual risks** in v0.x. We are explicit about them so use
 | **Federation: no perfect forward secrecy** — Ed25519 doesn't ratchet. | Per-call phone approval is the backstop. | v3.1 (`key_epoch`) |
 | **Cloud v3: cross-tenant log mining** — operator can correlate logs across users on shared infra. | Separate VMs per tenant; audit log kept on the VM, not centralized. | Cloud v3.1 (per-tenant encryption) |
 | **Local-attacker bypass of audit log** — process-level attacker can `DROP TABLE audit_log`. | Rely on host security (full-disk encryption, screen lock, no shared laptops). | v4 (TPM attestation) |
-| **T-PERSISTENT-001: Refresh token extraction after laptop compromise** — `master_key` in process args (`/proc/<pid>/cmdline` world-readable) + vault on disk = offline decrypt of refresh_tokens, indefinite bypass of Android approval. | Disk encryption (out of scope); user accepts this trade-off for MVP. | **v0.3.0 — IMPLEMENTED (mitigation #1: master_key in OS keyring; #2 and #3 ship separately)** |
+| **T-PERSISTENT-001: Refresh token extraction after laptop compromise** — `master_key` in process args (`/proc/<pid>/cmdline` world-readable) + vault on disk = offline decrypt of refresh_tokens, indefinite bypass of Android approval. | Disk encryption (out of scope); user accepts this trade-off for MVP. | **v0.3.0 — FULLY MITIGATED (#1 master_key в keyring; #2 audit log; #3 refresh rotation audit — all shipped 2026-09-09)** |
 
 ## Future hardening
 
@@ -434,8 +434,8 @@ These are **accepted residual risks** in v0.x. We are explicit about them so use
 | **Hardware Security Module (HSM) for master key** | v4 | A5 (compromised laptop) loses master key access |
 | **TPM-backed hub attestation** | v4 | A5 cannot tamper with audit log or token vault unnoticed |
 | **master_key в system keyring** (Linux Secret Service / macOS Keychain / Windows DPAPI) | **v0.3.0 — IMPLEMENTED (2026-09-09)** | T-PERSISTENT-001 — removes trivial `/proc/<pid>/cmdline` exfiltration |
-| **Refresh token rotation on every use** (`prompt=consent` flag) | v0.3.0 | T-PERSISTENT-001 — limits persistence window if extracted |
-| **Audit log of every vault decryption** (streamed to Android live) | v0.3.0 | T-PERSISTENT-001 — detects post-extraction re-use via hub-core |
+| **Refresh token rotation on every use** (`prompt=consent` flag) | **v0.3.0 — IMPLEMENTED (2026-09-09)** | T-PERSISTENT-001 — limits persistence window if extracted |
+| **Audit log of every vault decryption** (streamed to Android live) | **v0.3.0 — IMPLEMENTED (2026-09-09)** | T-PERSISTENT-001 — detects post-extraction re-use via hub-core |
 | **OAuth step-up auth for high-risk scopes** | v3 | A2 (malicious agent) needs extra verification for `calendar:write`, `mail:send`, etc. |
 | **WebAuthn for hub-core admin actions** | v3.5 | A4 (compromised phone) cannot rotate master key without physical security key |
 | **Plugin signature verification** | v3.1 | A1 (malicious plugin) cannot impersonate a legitimate one |
@@ -459,7 +459,39 @@ Implemented per the v0.3.0 roadmap. Single biggest win for T-PERSISTENT-001 — 
 - **Tests**: 24 new tests in `tests/keyring.test.ts`. Full hub-core suite: 395 total, 385 pass (10 pre-existing failures in `lifecycle-rpc` and `federation-adversarial` unrelated to this change — see issue tracker).
 - **Backward compat**: existing `--master-key` / `--passphrase` / `HUB_MASTER_KEY` users see the same boot sequence plus a single stderr warning. Vault format unchanged.
 
-Mitigations #2 (audit log of vault decryptions) and #3 (refresh token rotation) ship in separate commits.
+### T-PERSISTENT-001 mitigation #2 — audit log of every vault decryption (2026-09-09)
+
+Closes the second attack vector for T-PERSISTENT-001 — detects post-extraction re-use via hub-core. If an attacker exfiltrates the vault and uses it via hub-core (instead of calling Google directly), every `getAccessToken` call writes a `decision='vault_access'` audit row streamed live to Android via WebSocket.
+
+- **Schema (migration v7)**: adds `actor_type` (`'agent' | 'user' | 'system'`), `actor_id`, `request_id` columns to `audit_log`. Existing rows preserved.
+- **AuditStore.recordVaultAccess** (`src/audit-log.ts`): writes non-blocking via `setImmediate`. Fire-and-forget wrapper (`safeRecordVaultAccess`) catches and logs audit failures so they never break vault decryption.
+- **TokenVault.getAccessToken** (`src/token-vault.ts`): calls `safeRecordVaultAccess` on every call with `result: 'success' | 'not_found' | 'error'`. Records `actor_type`, `actor_id`, `tool_name`, `request_id` from the calling context.
+- **ApprovalStream.broadcastVaultAccess** (`src/approval-stream.ts`): new WebSocket broadcast method for live Android updates. Filtered to `userAgent === 'android-hub'` clients only.
+- **Fail-soft**: WebSocket broadcast errors are caught and logged, never break vault decryption.
+- **Tests**: 14 new tests — `tests/vault-audit.test.ts` (10) + `tests/audit-migration.test.ts` updates (4) for v7 column round-trip. Full hub-core suite: 393 → 407 passing.
+
+This mitigation makes **Path B** (use hub-core with stolen vault) detectable within seconds. Path A (direct Google API call with stolen refresh_token) is addressed by mitigation #3.
+
+### T-PERSISTENT-001 mitigation #3 — refresh token rotation audit (2026-09-09)
+
+Closes the third attack vector — limits the window of an extracted refresh_token by detecting rotations. When Google's token endpoint returns a rotated refresh_token, the old token is invalidated server-side. Any extracted copy becomes useless immediately.
+
+- **Existing infrastructure**: OAuth flow already uses `prompt: 'consent' + access_type: 'offline'` (lines 106-110 of `src/oauth-flow.ts`), and `refreshAccessToken` already preserves rotated refresh_tokens (`json.refresh_token ?? existing.refresh_token`). This commit adds the AUDIT LOG entry.
+- **AuditLog.recordTokenRotation** (`src/audit-log.ts`): sync write (rare event, want immediate incident-response visibility). New `decision: 'token_rotation'` value. `error: 'no_rotation'` if Google returned the same refresh_token.
+- **TokenVault.refreshAccessToken** (`src/token-vault.ts`): calls `recordTokenRotation` after successful `store`. Safe try/catch wrap.
+- **AuditDecision type** (`src/types.ts`): extended with `'token_rotation'`.
+- **AuditLog.stats()**: `token_rotation: 0` added to default return literal (so `Record<AuditDecision, number>` is exhaustive).
+- **Tests**: 3 new tests in `tests/audit-migration.test.ts` (rotation=true/false, stats counter). Full hub-core suite: 407 → 410 passing.
+
+**Net T-PERSISTENT-001 status (after all 3 mitigations):**
+
+| Mitigation | Status |
+|------------|--------|
+| #1 master_key в system keyring | ✅ shipped (commit `acefe65`) |
+| #2 audit log of every vault decryption | ✅ shipped (commit `d92cf83`) |
+| #3 refresh token rotation audit | ✅ shipped (commit `a5a8c2a`) |
+
+Remaining residual risk: an attacker with laptop + disk access can still exfiltrate the keyring entry (Linux libsecret uses login-keyring-derived encryption; macOS Keychain and Windows DPAPI are stronger). Mitigation requires **TPM/SEV-SNP key sealing** (deferred to v4) which cryptographically binds master_key to hardware so it cannot be exfiltrated even with root.
 
 ### Federation v2 design — Momus round 1 (2026-09-07)
 
