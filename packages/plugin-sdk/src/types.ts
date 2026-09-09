@@ -236,6 +236,12 @@ export interface ToolCallResult {
    * mcp-server. Tests assert against this field directly.
    */
   data: unknown;
+  /**
+   * Optional MCP content array. v1 plugins returned this directly;
+   * kept optional so test fixtures and legacy plugins still typecheck.
+   * Hub prefers `data` when present, falls back to `content`.
+   */
+  content?: Array<{ type: 'text'; text: string }>;
   /** Set true when the tool ran but reported a logical error. */
   isError?: boolean;
 }

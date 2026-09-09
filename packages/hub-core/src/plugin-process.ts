@@ -58,6 +58,8 @@ interface JsonRpcNotification {
 export interface ToolCallResult {
   /** Plugin's raw return value (v2 dispatch contract). */
   data: unknown;
+  /** Optional MCP content array (v1 plugins / test mocks). */
+  content?: Array<{ type: 'text'; text: string }>;
   isError?: boolean;
 }
 
