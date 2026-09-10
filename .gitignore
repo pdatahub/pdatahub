@@ -50,3 +50,6 @@ opencode/
 .debris/
 .opencode/
 .codegraph/
+packages/plugin-sdk/*.tgz
+
+# pnpm tarballs (built locally, uploaded via gh release)
