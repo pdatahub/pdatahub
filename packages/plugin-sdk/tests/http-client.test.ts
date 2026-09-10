@@ -117,6 +117,35 @@ describe('HttpClient — 2xx success path', () => {
     expect(lastRequest!.headers['content-type']).toBe('application/json');
     expect(JSON.parse(lastRequest!.body)).toEqual({ name: 'thing', qty: 7 });
   });
+
+  it('honors per-request custom headers (Slack form-urlencoded use case)', async () => {
+    await startServer((_req, res) => {
+      res.writeHead(200);
+      res.end('{}');
+    });
+
+    const client = new HttpClient({ token: 'tok' }, { baseUrl });
+    await client.post('/slack/api', 'channel=C01&text=hello', {
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    });
+
+    expect(lastRequest!.headers['content-type']).toBe('application/x-www-form-urlencoded');
+    expect(lastRequest!.body).toBe('channel=C01&text=hello');
+  });
+
+  it('silently ignores per-request Authorization header (vault token always wins)', async () => {
+    await startServer((_req, res) => {
+      res.writeHead(200);
+      res.end('{}');
+    });
+
+    const client = new HttpClient({ token: 'real-vault-token' }, { baseUrl });
+    await client.get('/me', {
+      headers: { authorization: 'Bearer attacker-supplied-token' } as Record<string, string>,
+    });
+
+    expect(lastRequest!.headers['authorization']).toBe('Bearer real-vault-token');
+  });
 });
 
 describe('HttpClient — 4xx error mapping', () => {

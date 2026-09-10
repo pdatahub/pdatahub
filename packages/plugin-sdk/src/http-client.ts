@@ -49,6 +49,20 @@ export interface HttpClientOptions {
 export interface HttpRequestOptions {
   /** Query string params, appended to the URL. */
   params?: Record<string, unknown>;
+  /**
+   * Per-request headers merged on top of the client's defaultHeaders.
+   *
+   * Most plugins don't need this — the Hub injects `Authorization` and
+   * sets `content-type: application/json` automatically. Use it when:
+   *   - The upstream API requires a non-JSON content-type (e.g. Slack's
+   *     form-urlencoded bodies, GitHub's `application/vnd.github+json`).
+   *   - The plugin needs to send a custom `Accept` header for a
+   *     versioned endpoint.
+   *
+   * The Authorization header from the vault is always preserved — any
+   * value you pass here for `authorization` is silently overwritten.
+   */
+  headers?: Record<string, string>;
 }
 
 export interface HttpResponse<T> {
@@ -139,18 +153,26 @@ export class HttpClient {
     options: HttpRequestOptions & { body?: unknown } = {},
   ): Promise<HttpResponse<T>> {
     const url = this.buildUrl(path, options.params);
-    const headers: Record<string, string> = {
-      ...(this.options.defaultHeaders ?? {}),
-    };
+    const headers: Record<string, string> = {};
+    for (const [k, v] of Object.entries(this.options.defaultHeaders ?? {})) {
+      headers[k.toLowerCase()] = v;
+    }
 
     if (this.context.token) {
-      headers['Authorization'] = `Bearer ${this.context.token}`;
+      headers['authorization'] = `Bearer ${this.context.token}`;
     }
 
     let body: string | undefined;
     if (options.body !== undefined) {
-      headers['Content-Type'] = 'application/json';
-      body = JSON.stringify(options.body);
+      headers['content-type'] = headers['content-type'] ?? 'application/json';
+      body = typeof options.body === 'string' ? options.body : JSON.stringify(options.body);
+    }
+
+    if (options.headers) {
+      for (const [name, value] of Object.entries(options.headers)) {
+        if (name.toLowerCase() === 'authorization') continue;
+        headers[name.toLowerCase()] = value;
+      }
     }
 
     const timeout = this.options.timeoutMs ?? 30000;

@@ -84,7 +84,7 @@ describe('HttpClient', () => {
     await client.get('https://api.example.com/me');
 
     const opts = reqFn.calls[0]!.opts as { headers: Record<string, string> };
-    expect(opts.headers['Authorization']).toBe('Bearer abc123');
+    expect(opts.headers['authorization']).toBe('Bearer abc123');
   });
 
   it('omits Authorization when no token', async () => {
@@ -93,7 +93,7 @@ describe('HttpClient', () => {
     await client.get('https://api.example.com/me');
 
     const opts = reqFn.calls[0]!.opts as { headers: Record<string, string> };
-    expect(opts.headers['Authorization']).toBeUndefined();
+    expect(opts.headers['authorization']).toBeUndefined();
   });
 
   it('serializes JSON body for POST', async () => {
@@ -107,7 +107,7 @@ describe('HttpClient', () => {
       body: string;
     };
     expect(opts.method).toBe('POST');
-    expect(opts.headers['Content-Type']).toBe('application/json');
+    expect(opts.headers['content-type']).toBe('application/json');
     expect(JSON.parse(opts.body)).toEqual({ name: 'test' });
   });
 
@@ -117,7 +117,7 @@ describe('HttpClient', () => {
     await client.get('https://api.example.com/me');
 
     const opts = reqFn.calls[0]!.opts as { headers: Record<string, string> };
-    expect(opts.headers['Content-Type']).toBeUndefined();
+    expect(opts.headers['content-type']).toBeUndefined();
   });
 
   it('parses JSON response body', async () => {
@@ -143,7 +143,7 @@ describe('HttpClient', () => {
     await client.get('https://api.example.com/me');
 
     const opts = reqFn.calls[0]!.opts as { headers: Record<string, string> };
-    expect(opts.headers['X-Plugin']).toBe('pdatahub');
+    expect(opts.headers['x-plugin']).toBe('pdatahub');
   });
 
   it('passes through status code', async () => {
