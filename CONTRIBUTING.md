@@ -185,18 +185,18 @@ The plugin SDK is distributed via **GitHub Releases** (not npm — see [docs/arc
 ```bash
 # 1. Bump version in packages/plugin-sdk/package.json
 # 2. Tag the monorepo
-git tag v0.2.0
+git tag v0.3.0
 git push --tags
 # 3. CI builds the .tgz and attaches it to the release
-gh release create v0.2.0 \
-  packages/plugin-sdk/pdatahub-plugin-sdk-0.2.0.tgz \
-  --title "v0.2.0" \
+gh release create v0.3.0 \
+  packages/plugin-sdk/pdatahub-plugin-sdk-0.3.0.tgz \
+  --title "v0.3.0" \
   --notes "..."
 ```
 
 Hub-core, mcp-server, relay, android-app, and runner are not separately published — they evolve in lockstep with the monorepo. A monorepo version bump is a single PR that touches every `package.json` (or `build.gradle.kts` for android-app, `go.mod` for runner). Don't bump one package alone unless you're patching a hot-fix.
 
-Tag format: `vX.Y.Z`. We are pre-1.0 (currently v0.1.0), so breaking changes bump the minor version and may include any number of patches.
+Tag format: `vX.Y.Z`. We are pre-1.0 (currently hub-core v0.3.0, plugin-sdk v0.2.2), so breaking changes bump the minor version and may include any number of patches.
 
 ## Plugin author guidance
 

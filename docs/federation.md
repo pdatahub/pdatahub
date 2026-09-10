@@ -294,7 +294,7 @@ These are accepted for MVP and addressed in v3+. They are **not** bugs — they 
 | Revoked delegations don't broadcast — B only learns on next call (`403 DELEGATION_REVOKED`) | B can manually delete the row from `peer_delegations` after seeing a 403 | v3 (signed revocation broadcast) |
 | No automatic expiry cleanup — expired rows live in DB | Run `sqlite3 hub.db "DELETE FROM peer_delegations WHERE expires_at < datetime('now')"` periodically | v3 (scheduled task) |
 | No perfect forward secrecy — Ed25519 doesn't ratchet | Per-call approval is the real backstop; revoke all delegations + re-issue if signing key compromised | v3 (key_epoch) |
-| Per-delegation rate limit only, no per-peer global cap | `/v1/federation/call` enforces 10 pending approvals / 60s per `(peer_verify_key, agent_id)` | v3 |
+| Per-delegation rate limit only, no per-peer global cap | `/v1/federation/call` enforces 10 pending approvals / 60s per `(peer_verify_key, agent_id)`. Local endpoints additionally rate-limited per (IP, route_class) — see MIT-005 in `docs/threat-model.md` | v3 (per-peer global cap) |
 | A's phone must be reachable for every call | Approval fast-paths to `503 NO_APPROVER_CONNECTED` if no `/approval-stream` clients — better than burning 120s on a timeout | unchanged |
 | One tool per delegation — no folder scopes, no "calendar listEvents but only certain calendars" | Compose multiple delegations if needed | v3 (per-user scope refinement) |
 
@@ -327,7 +327,7 @@ See [design doc §"Security model"](../.omo/plans/federation-v2-design.md#securi
 
 | Symptom | Likely cause | Fix |
 |---------|--------------|-----|
-| `pdatahub-hub delegate` returns `plugin "X" not found in registry` | Hub started without the plugin loaded | Start the hub with `--plugins-dir <path>` containing the plugin; or skip the CLI and use the HTTP `/v1/federation/delegate` endpoint (Phase 4 said scope validation is best-effort at CLI) |
+| `pdatahub-hub delegate` returns `plugin "X" not found in registry` | Hub started without the plugin loaded | Start the hub with `--plugins-dir <path>` containing the plugin; or skip the CLI and use the HTTP `/v1/federation/delegate` endpoint (Phase 4 said scope validation is best-effort at CLI). The CLI also has HTTP mode: pass `--hub-url <url>` to talk to a running hub without holding master_key locally — see `docs/cli-reference.md` |
 | `accept-delegation` says `signature verification failed: signature mismatch` | Tampered blob or wrong issuer verify_key | Re-share the blob with A; double-check you copied it character-for-character |
 | B's call returns `403 DELEGATION_REVOKED` | A revoked | Ask A to re-issue |
 | B's call returns `403 DELEGATION_EXPIRED` | Past `--expires` | Ask A to re-issue with longer TTL |

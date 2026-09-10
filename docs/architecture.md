@@ -243,7 +243,7 @@ Plugins are distributed via **GitHub Releases** (npmjs.com is closed to this pro
 
 ```bash
 # Plugin author publishes:
-git tag v0.2.0
+git tag v0.3.0
 git push --tags
 # → GitHub Actions builds, uploads plugin.tgz to release
 
