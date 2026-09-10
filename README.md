@@ -122,9 +122,9 @@ See [docs/federation.md](./docs/federation.md) for the user-facing walkthrough a
 
 | Package | What | Status |
 |---------|------|--------|
-| [`packages/hub-core/`](./packages/hub-core/) | Node.js Hub core (HTTP + plugins + vault + audit + WS + federation) | ✅ v0.1.0 — e2e verified |
-| [`packages/mcp-server/`](./packages/mcp-server/) | MCP bridge for AI agents → Hub | ✅ v0.1.0 |
-| [`packages/plugin-sdk/`](./packages/plugin-sdk/) | TypeScript SDK for plugin authors (decorators, http client, JSON-RPC) | ✅ v0.1.0 — GitHub Releases |
+| [`packages/hub-core/`](./packages/hub-core/) | Node.js Hub core (HTTP + plugins + vault + audit + WS + federation) | ✅ v0.3.0 — rate limit + error sanitize + federation delegation endpoints |
+| [`packages/mcp-server/`](./packages/mcp-server/) | MCP bridge for AI agents → Hub (stdio/JSON-RPC + in-process integration test) | ✅ v0.1.0 |
+| [`packages/plugin-sdk/`](./packages/plugin-sdk/) | TypeScript SDK for plugin authors (decorators, http client, lifecycle stats, typed PluginError, JSON-RPC) | ✅ v0.2.2 — GitHub Releases |
 | [`packages/relay/`](./packages/relay/) | Cloudflare Worker relay (cross-network pairing fallback) | ✅ v0.1.0 — stub |
 | [`packages/android-app/`](./packages/android-app/) | Android UI client (approval + audit + biometric) | ✅ v0.1.0 — debug build |
 | [`packages/runner/`](./packages/runner/) | Go control-plane daemon (Hetzner VM provisioning + hub-core deploy) | 🚧 Phase 1A skeleton — mocked Hetzner, cloud-init generator, deploy planner |
@@ -133,8 +133,10 @@ See [docs/federation.md](./docs/federation.md) for the user-facing walkthrough a
 
 ## External repos
 
-- [`pdatahub/pdatahub-plugin-template`](https://github.com/pdatahub/pdatahub-plugin-template) — scaffold template for plugin authors
-- [`pdatahub/pdatahub-plugin-google-calendar`](https://github.com/pdatahub/pdatahub-plugin-google-calendar) — reference plugin (e2e verified)
+- [`pdatahub/pdatahub-plugin-template`](https://github.com/pdatahub/pdatahub-plugin-template) — scaffold template for plugin authors (SDK v0.2.2)
+- [`pdatahub/pdatahub-plugin-google-calendar`](https://github.com/pdatahub/pdatahub-plugin-google-calendar) — reference plugin (SDK v0.2.2, e2e verified)
+- [`pdatahub/pdatahub-plugin-google-gmail`](https://github.com/pdatahub/pdatahub-plugin-google-gmail) — Gmail read/send plugin (SDK v0.2.2)
+- [`pdatahub/pdatahub-site`](https://github.com/pdatahub/pdatahub-site) — landing page at [pdatahub.github.io/pdatahub-site](https://pdatahub.github.io/pdatahub-site/)
 
 Each lives in its own repo so plugins can be developed, versioned, and released independently.
 
