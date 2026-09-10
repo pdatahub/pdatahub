@@ -1,5 +1,9 @@
 # Threat Model
 
+> **This document is intentionally public.** Security through obscurity is a mistake — if an attacker finds a vulnerability, they'd find it regardless of whether we publish this. Publishing the threat model lets security researchers audit our reasoning, lets self-hosters understand the residual risk they're accepting, and lets plugin authors make informed decisions about what to defend against.
+>
+> That said: **implementation specifics** (specific key formats, internal endpoint paths, exact cryptographic parameters) are kept in the code itself, not here. This document describes the **adversary model** and the **defenses**; the code shows how those defenses are implemented.
+
 > **Audience:** engineers contributing to pdatahub, security researchers evaluating it, and self-hosters deciding what residual risk they're accepting.
 >
 > **Scope:** hub-core, mcp-server, plugin-sdk, relay, android-app, runner. Federation v2 is in scope as of v0.1.0 (2026-09-08). Cloud v3 design is documented in `.omo/plans/cloud-v3-design.md`; its threat model inherits from this one with per-tenant isolation additions.

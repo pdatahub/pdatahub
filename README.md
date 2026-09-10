@@ -9,7 +9,7 @@
 [![Self-hosted](https://img.shields.io/badge/self--hosted-yes-purple)](./docs/self-hosting.md)
 [![Website](https://img.shields.io/badge/website-pdatahub.github.io-blue)](https://pdatahub.github.io/pdatahub-site/)
 
-> Privacy-first personal data platform with per-action approval, time-bounded grants, auditable AI-agent access, and Federation v2 (cross-user delegation).
+> **Self-hosted MCP hub for AI agents.** Your phone approves every tool call. OAuth tokens stay on your hardware — never on a vendor's server. Open source (MIT), 3 plugins shipped (Calendar, Gmail, Slack), Docker one-liner install. No SaaS, no telemetry, no cloud lock-in.
 
 **Status (2026-09-10):** MVP shipped end-to-end. Docker one-liner install. hub-core v0.3.0 (462 tests), plugin-sdk v0.2.3 (154 tests, per-request headers + form-urlencoded support), mcp-server (35 tests with end-to-end integration). Three plugins shipped: **google-calendar**, **google-gmail**, **slack**. Federation v2 complete — two-hub delegation with Ed25519-signed blobs. Landing page live at [pdatahub.github.io/pdatahub-site](https://pdatahub.github.io/pdatahub-site/).
 
@@ -273,15 +273,14 @@ Momus is our adversarial review tool for significant design changes (federation 
 
 ---
 
-## Security
+## Security & privacy
 
-See [SECURITY.md](./SECURITY.md) for:
+This project takes security and privacy seriously. Three documents cover different angles:
 
-- Supported versions (currently `main` and `v0.1.x`)
-- Vulnerability disclosure process (90-day window, [security@pdatahub.io](mailto:security@pdatahub.io))
-- Threat model summary (full version in [docs/threat-model.md](./docs/threat-model.md))
-- Known limitations / out-of-scope
-- Audit history (Momus rounds for federation v2 and Cloud v3 design)
+- **[SECURITY.md](./SECURITY.md)** — vulnerability disclosure (90-day coordinated window), supported versions, reporting via [security@pdatahub.io](mailto:security@pdatahub.io) or GitHub private advisories
+- **[docs/threat-model.md](./docs/threat-model.md)** — adversary model, defenses, accepted residual risks. **Intentionally public** — security through obscurity is a mistake
+- **[docs/privacy.md](./docs/privacy.md)** — what we collect (nothing — self-hosted, no telemetry), what your hub stores, third-party plugin data flows, GDPR/COPPA notes
+- **[docs/terms.md](./docs/terms.md)** — MIT license terms, no warranty, your responsibilities, plugin author liability, Federation trust model
 
 For federation-specific threat-model TL;DR, see [docs/federation.md §Threat model](./docs/federation.md#threat-model-tldr).
 
