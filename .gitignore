@@ -53,3 +53,6 @@ opencode/
 packages/plugin-sdk/*.tgz
 
 # pnpm tarballs (built locally, uploaded via gh release)
+
+# Local backup snapshots (created by 'make backup')
+backups/
