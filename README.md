@@ -11,7 +11,7 @@
 
 > Privacy-first personal data platform with per-action approval, time-bounded grants, auditable AI-agent access, and Federation v2 (cross-user delegation).
 
-**Status (2026-09-08):** Federation v2 complete across all eight phases — two-hub delegation with Ed25519-signed blobs, per-call phone approval, signed audit retention CLI. Hub-core 310/310 tests pass; Android 39/39 pass.
+**Status (2026-09-10):** MVP shipped end-to-end. Docker one-liner install. hub-core v0.3.0 (462 tests), plugin-sdk v0.2.3 (154 tests, per-request headers + form-urlencoded support), mcp-server (35 tests with end-to-end integration). Three plugins shipped: **google-calendar**, **google-gmail**, **slack**. Federation v2 complete — two-hub delegation with Ed25519-signed blobs. Landing page live at [pdatahub.github.io/pdatahub-site](https://pdatahub.github.io/pdatahub-site/).
 
 ---
 
@@ -124,7 +124,7 @@ See [docs/federation.md](./docs/federation.md) for the user-facing walkthrough a
 |---------|------|--------|
 | [`packages/hub-core/`](./packages/hub-core/) | Node.js Hub core (HTTP + plugins + vault + audit + WS + federation) | ✅ v0.3.0 — rate limit + error sanitize + federation delegation endpoints |
 | [`packages/mcp-server/`](./packages/mcp-server/) | MCP bridge for AI agents → Hub (stdio/JSON-RPC + in-process integration test) | ✅ v0.1.0 |
-| [`packages/plugin-sdk/`](./packages/plugin-sdk/) | TypeScript SDK for plugin authors (decorators, http client, lifecycle stats, typed PluginError, JSON-RPC) | ✅ v0.2.2 — GitHub Releases |
+| [`packages/plugin-sdk/`](./packages/plugin-sdk/) | TypeScript SDK for plugin authors (decorators, httpClient, lifecycle stats, typed PluginError, per-request headers, JSON-RPC) | ✅ v0.2.3 — GitHub Releases |
 | [`packages/relay/`](./packages/relay/) | Cloudflare Worker relay (cross-network pairing fallback) | ✅ v0.1.0 — stub |
 | [`packages/android-app/`](./packages/android-app/) | Android UI client (approval + audit + biometric) | ✅ v0.1.0 — debug build |
 | [`packages/runner/`](./packages/runner/) | Go control-plane daemon (Hetzner VM provisioning + hub-core deploy) | 🚧 Phase 1A skeleton — mocked Hetzner, cloud-init generator, deploy planner |
@@ -136,6 +136,7 @@ See [docs/federation.md](./docs/federation.md) for the user-facing walkthrough a
 - [`pdatahub/pdatahub-plugin-template`](https://github.com/pdatahub/pdatahub-plugin-template) — scaffold template for plugin authors (SDK v0.2.2)
 - [`pdatahub/pdatahub-plugin-google-calendar`](https://github.com/pdatahub/pdatahub-plugin-google-calendar) — reference plugin (SDK v0.2.2, e2e verified)
 - [`pdatahub/pdatahub-plugin-google-gmail`](https://github.com/pdatahub/pdatahub-plugin-google-gmail) — Gmail read/send plugin (SDK v0.2.2)
+- [`pdatahub/pdatahub-plugin-slack`](https://github.com/pdatahub/pdatahub-plugin-slack) — Slack channels + messages + users (SDK v0.2.3, form-urlencoded via per-request headers)
 - [`pdatahub/pdatahub-site`](https://github.com/pdatahub/pdatahub-site) — landing page at [pdatahub.github.io/pdatahub-site](https://pdatahub.github.io/pdatahub-site/)
 
 Each lives in its own repo so plugins can be developed, versioned, and released independently.
@@ -146,15 +147,27 @@ Each lives in its own repo so plugins can be developed, versioned, and released 
 
 Three paths depending on what you're here for:
 
-### Path A — Docker (fastest, but limited)
+### Path A — Docker (recommended for first-time users)
 
 ```bash
 git clone https://github.com/pdatahub/pdatahub
 cd pdatahub
-docker compose up   # see docker-compose.yml (planned for v3.1; today use Path B)
+docker compose up
 ```
 
-> Docker support is **not yet shipped** (planned for v0.2). Use Path B for now.
+Hub starts on http://localhost:8080. On first run the entrypoint generates
+`master_key` (for the vault) and `HUB_API_TOKEN` (for HTTP auth), persists them
+to `/data/.env`, and prints the master_key **fingerprint** (never the key
+itself). Plugins mount via `./plugins/` — install one with:
+
+```bash
+mkdir -p plugins/google-calendar
+curl -L https://github.com/pdatahub/pdatahub-plugin-google-calendar/releases/latest/download/pdatahub-plugin-google-calendar-*.tgz \
+  | tar -xz -C plugins/google-calendar
+docker compose restart hub
+```
+
+Full guide: [docs/docker.md](./docs/docker.md) (OAuth callbacks, plugin install, troubleshooting, persistence, architecture diagram).
 
 ### Path B — Self-host (recommended)
 
