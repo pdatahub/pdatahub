@@ -44,6 +44,15 @@ import {
   cmdRevokeDelegation,
   parseDurationAgo,
 } from './federation/delegation-cli.js';
+import {
+  FederationHttpClient,
+  resolveHubUrl,
+  resolveApiToken,
+  FederationHttpError,
+  type DelegateHttpResult,
+  type ListDelegationsHttpResult,
+  type RevokeHttpResult,
+} from './federation/federation-http.js';
 import { logger } from './logger.js';
 import { runMigrations } from './migrations.js';
 import { checkHubApiTokenRequirement } from './startup.js';
@@ -126,6 +135,15 @@ const VALUE_FLAGS = new Set([
   '--keyring-account',
   '--store-keyring',
   '--legacy-master-key',
+  '--hub-url',
+  '--api-token',
+  '--format',
+  '--filter',
+  '--expires',
+  '--peer-verify-key',
+  '--plugin',
+  '--tool',
+  '--scope',
 ]);
 
 function findFirstPositional(argv: string[]): string | undefined {
@@ -136,6 +154,43 @@ function findFirstPositional(argv: string[]): string | undefined {
     }
   }
   return undefined;
+}
+
+/**
+ * Common flags shared by federation subcommands. Pass them via
+ * `--hub-url <url>`, `--api-token <token>`, `--format <table|json>`,
+ * `--filter <granted|received|all>`. Hub URL also read from PDHUB_URL env.
+ *
+ * Behavior:
+ *   - If `hubUrl` is set (or PDHUB_URL env is set), the CLI talks to the
+ *     running hub via HTTP. `apiToken` (or PDHUB_API_TOKEN/HUB_API_TOKEN env)
+ *     is REQUIRED in HTTP mode.
+ *   - If `hubUrl` is unset, the CLI uses direct DB access (requires
+ *     master_key resolution via the legacy path). Useful for offline
+ *     management or for hubs without HUB_API_TOKEN configured.
+ *   - `format` defaults to `table`; `json` is for scripting.
+ *   - `filter` defaults to `all`; `granted` shows A-side, `received` shows B-side.
+ */
+interface FederationCommonFlags {
+  hubUrl?: string;
+  apiToken?: string;
+  format: 'table' | 'json';
+  filter: 'all' | 'granted' | 'received';
+}
+
+function parseCommonFederationFlags(argv: string[]): FederationCommonFlags {
+  const hubUrlIdx = argv.indexOf('--hub-url');
+  const hubUrl = hubUrlIdx !== -1 && argv[hubUrlIdx + 1] ? argv[hubUrlIdx + 1] : undefined;
+  const apiTokenIdx = argv.indexOf('--api-token');
+  const apiToken = apiTokenIdx !== -1 && argv[apiTokenIdx + 1] ? argv[apiTokenIdx + 1] : undefined;
+  const formatIdx = argv.indexOf('--format');
+  const formatRaw = formatIdx !== -1 && argv[formatIdx + 1] ? argv[formatIdx + 1] : 'table';
+  const format: 'table' | 'json' = formatRaw === 'json' ? 'json' : 'table';
+  const filterIdx = argv.indexOf('--filter');
+  const filterRaw = filterIdx !== -1 && argv[filterIdx + 1] ? argv[filterIdx + 1] : 'all';
+  const filter: 'all' | 'granted' | 'received' =
+    filterRaw === 'granted' || filterRaw === 'received' ? filterRaw : 'all';
+  return { hubUrl, apiToken, format, filter };
 }
 
 function parseSubcommand(argv: string[]):
@@ -161,6 +216,7 @@ function parseSubcommand(argv: string[]):
       expires: string;
       dbPath?: string;
       masterKeyHex?: string;
+      common: FederationCommonFlags;
     }
   | {
       kind: 'accept-delegation';
@@ -173,17 +229,20 @@ function parseSubcommand(argv: string[]):
       kind: 'delegate-list';
       dbPath?: string;
       masterKeyHex?: string;
+      common: FederationCommonFlags;
     }
   | {
       kind: 'delegation-list';
       dbPath?: string;
       masterKeyHex?: string;
+      common: FederationCommonFlags;
     }
   | {
       kind: 'delegation-revoke';
       delegationId: string;
       dbPath?: string;
       masterKeyHex?: string;
+      common: FederationCommonFlags;
     }
   | {
       kind: 'audit-purge';
@@ -266,7 +325,7 @@ function parseSubcommand(argv: string[]):
         const mIdx = argv.indexOf('--master-key');
         const masterKeyHex =
           mIdx !== -1 && argv[mIdx + 1] ? argv[mIdx + 1] : undefined;
-        return { kind: 'delegate-list', dbPath, masterKeyHex };
+        return { kind: 'delegate-list', dbPath, masterKeyHex, common: parseCommonFederationFlags(argv) };
       }
       // Required flags.
       const reqFlag = (name: string): string => {
@@ -291,6 +350,7 @@ function parseSubcommand(argv: string[]):
         expires: reqFlag('--expires'),
         dbPath,
         masterKeyHex,
+        common: parseCommonFederationFlags(argv),
       };
     }
     case 'accept-delegation': {
@@ -321,7 +381,7 @@ function parseSubcommand(argv: string[]):
         const mIdx = argv.indexOf('--master-key');
         const masterKeyHex =
           mIdx !== -1 && argv[mIdx + 1] ? argv[mIdx + 1] : undefined;
-        return { kind: 'delegation-list', dbPath, masterKeyHex };
+        return { kind: 'delegation-list', dbPath, masterKeyHex, common: parseCommonFederationFlags(argv) };
       }
       if (sub === 'revoke') {
         const idIdx = dlgIdx + 2 < argv.length ? dlgIdx + 2 : -1;
@@ -336,7 +396,7 @@ function parseSubcommand(argv: string[]):
         const mIdx = argv.indexOf('--master-key');
         const masterKeyHex =
           mIdx !== -1 && argv[mIdx + 1] ? argv[mIdx + 1] : undefined;
-        return { kind: 'delegation-revoke', delegationId, dbPath, masterKeyHex };
+        return { kind: 'delegation-revoke', delegationId, dbPath, masterKeyHex, common: parseCommonFederationFlags(argv) };
       }
       throw new Error('usage: pdatahub-hub delegation <list|revoke>');
     }
@@ -439,6 +499,23 @@ DELEGATE FLAGS
   --expires <duration>      Duration like "24h", "30d", "1w"
   --yes                     Skip y/N confirmation (accept-delegation only)
 
+REMOTE HUB MODE (delegate, delegate list, delegation list, delegation revoke)
+  --hub-url <url>           Talk to a running hub via HTTP instead of direct DB
+                            access. Also reads from PDHUB_URL env.
+  --api-token <token>       Bearer token for HTTP mode. Also reads from
+                            PDHUB_API_TOKEN / HUB_API_TOKEN env.
+  --format <fmt>            Output format: table (default) | json
+  --filter <kind>           For list commands: all (default) | granted | received
+
+  When --hub-url is set, the CLI does NOT touch the SQLite database directly —
+  master_key never enters the CLI process. Useful for managing a hub running
+  on another machine (Cloud v3 future) or for scripting without holding the
+  master key locally.
+  When --hub-url is unset, the CLI uses direct DB access (requires master_key
+  resolution via --master-key, env, or keyring). accept-delegation is
+  always DB-direct — it requires DNS resolution + interactive confirmation
+  that are not exposed over HTTP.
+
 HUB STARTUP FLAGS
   --port <num>            HTTP port (default 8080)
   --db-path <path>        SQLite DB path (default ./pdatahub-hub.db)
@@ -473,6 +550,148 @@ SECURITY — T-PERSISTENT-001 (docs/threat-model.md)
   Linux: requires libsecret + a keyring daemon (gnome-keyring, KWallet).
   macOS / Windows: built-in.
 `);
+}
+
+/**
+ * Try to build a FederationHttpClient for the given common flags.
+ *
+ * Returns null when no hub URL is configured (caller should fall back
+ * to DB-direct). Throws when a hub URL IS configured but no API token
+ * can be resolved — silent fallback to DB would be a footgun (operator
+ * thinks the action succeeded when it was ignored).
+ */
+async function maybeFederationHttp(
+  common: FederationCommonFlags,
+): Promise<FederationHttpClient | null> {
+  const baseUrl = resolveHubUrl(common.hubUrl);
+  if (!baseUrl) return null;
+  const apiToken = await resolveApiToken(common.apiToken);
+  if (!apiToken) {
+    throw new Error(
+      `hub URL is set (${baseUrl}) but no API token found. ` +
+        `Pass --api-token <hex>, set PDHUB_API_TOKEN env, or set HUB_API_TOKEN env.`,
+    );
+  }
+  return new FederationHttpClient({ baseUrl, apiToken });
+}
+
+/**
+ * Load delegations from HTTP (running hub) or DB-direct (offline).
+ * Unifies the two paths into a single `{granted, received}` shape so
+ * the printer doesn't care where the data came from.
+ */
+async function loadDelegations(
+  cmd: Extract<
+    ReturnType<typeof parseSubcommand>,
+    { kind: 'delegate-list' | 'delegation-list' }
+  >,
+): Promise<ListDelegationsHttpResult> {
+  const http = await maybeFederationHttp(cmd.common);
+  if (http) {
+    try {
+      return await http.listDelegations();
+    } catch (err) {
+      if (err instanceof FederationHttpError) throw err;
+      throw new Error(`list delegations via hub failed: ${(err as Error).message}`);
+    }
+  }
+  const { masterKey, dbPath } = await resolveIdentityContext(
+    cmd.dbPath,
+    cmd.masterKeyHex,
+    undefined,
+  );
+  const [granted, received] = await Promise.all([
+    cmdListGranted(dbPath, masterKey),
+    cmdListReceived(dbPath, masterKey),
+  ]);
+  return { granted, received };
+}
+
+/** Print the delegate-created output (works for both HTTP and DB paths). */
+function printDelegateResult(
+  result: DelegateHttpResult,
+  plugin: string,
+  tool: string,
+  scope: string,
+  expires: string,
+): void {
+  // eslint-disable-next-line no-console
+  console.log(`Delegation issued: ${result.delegation_id}`);
+  // eslint-disable-next-line no-console
+  console.log(`Plugin: ${plugin} / ${tool}   Scope: ${scope}`);
+  // eslint-disable-next-line no-console
+  console.log(`Expires: ${expires}`);
+  // eslint-disable-next-line no-console
+  console.log('');
+  // eslint-disable-next-line no-console
+  console.log(`Blob (base64url, share this with the peer):`);
+  // eslint-disable-next-line no-console
+  console.log(result.blob);
+  if (result.qr_png_base64) {
+    // eslint-disable-next-line no-console
+    console.log('');
+    // eslint-disable-next-line no-console
+    console.log(`QR (base64 PNG, ${result.qr_png_base64.length} chars):`);
+    // eslint-disable-next-line no-console
+    console.log(result.qr_png_base64);
+  } else {
+    // eslint-disable-next-line no-console
+    console.log('');
+    // eslint-disable-next-line no-console
+    console.log(`(QR generation skipped — blob is the authoritative transport)`);
+  }
+}
+
+/** Print delegations in table or JSON format, honoring --filter. */
+function printDelegations(
+  data: ListDelegationsHttpResult,
+  format: 'table' | 'json',
+  filter: 'all' | 'granted' | 'received',
+): void {
+  if (format === 'json') {
+    const filtered =
+      filter === 'granted'
+        ? { granted: data.granted, received: [] }
+        : filter === 'received'
+          ? { granted: [], received: data.received }
+          : data;
+    // eslint-disable-next-line no-console
+    console.log(JSON.stringify(filtered, null, 2));
+    return;
+  }
+  // Table format
+  if (filter === 'all' || filter === 'granted') {
+    // eslint-disable-next-line no-console
+    console.log(`\nGRANTED (you issued these to peer hubs):`);
+    // eslint-disable-next-line no-console
+    console.log(
+      `${'ID'.padEnd(38)} ${'Plugin'.padEnd(22)} ${'Tool'.padEnd(16)} ${'Scope'.padEnd(18)} ${'Expires'.padEnd(22)} ${'Revoked'}`,
+    );
+    for (const r of data.granted) {
+      // eslint-disable-next-line no-console
+      console.log(
+        `${r.delegation_id.padEnd(38)} ${r.plugin.padEnd(22)} ${r.tool.padEnd(16)} ${r.scope.padEnd(18)} ${r.expires_at.padEnd(22)} ${r.revoked === 1 ? 'yes' : 'no'}`,
+      );
+    }
+    // eslint-disable-next-line no-console
+    console.log(`\n${data.granted.length} granted delegation(s).`);
+  }
+  if (filter === 'all' || filter === 'received') {
+    // eslint-disable-next-line no-console
+    console.log(`\nRECEIVED (peer hubs issued these to you):`);
+    // eslint-disable-next-line no-console
+    console.log(
+      `${'ID'.padEnd(38)} ${'Peer'.padEnd(16)} ${'Plugin'.padEnd(22)} ${'Tool'.padEnd(16)} ${'Scope'.padEnd(18)} ${'Expires'.padEnd(22)} ${'Revoked'}`,
+    );
+    for (const r of data.received) {
+      // eslint-disable-next-line no-console
+      console.log(
+        `${r.delegation_id.padEnd(38)} ${r.peer_hub_name.padEnd(16)} ${r.plugin.padEnd(22)} ${r.tool.padEnd(16)} ${r.scope.padEnd(18)} ${r.expires_at.padEnd(22)} ${r.revoked === 1 ? 'yes' : 'no'}`,
+      );
+    }
+    // eslint-disable-next-line no-console
+    console.log(`\n${data.received.length} received delegation(s).`);
+  }
 }
 
 async function handleSubcommand(
@@ -667,6 +886,24 @@ async function handleSubcommand(
   }
 
   if (cmd.kind === 'delegate') {
+    const http = await maybeFederationHttp(cmd.common);
+    if (http) {
+      let result: DelegateHttpResult;
+      try {
+        result = await http.delegate({
+          peer_verify_key: cmd.peerVerifyKey,
+          plugin: cmd.plugin,
+          tool: cmd.tool,
+          scope: cmd.scope,
+          expires_in: cmd.expires,
+        });
+      } catch (err) {
+        if (err instanceof FederationHttpError) throw err;
+        throw new Error(`delegate via hub failed: ${(err as Error).message}`);
+      }
+      printDelegateResult(result, cmd.plugin, cmd.tool, cmd.scope, cmd.expires);
+      return 0;
+    }
     const { masterKey, dbPath } = await resolveIdentityContext(
       cmd.dbPath,
       cmd.masterKeyHex,
@@ -686,53 +923,24 @@ async function handleSubcommand(
       scope: cmd.scope,
       expiresIn: cmd.expires,
     });
-    // eslint-disable-next-line no-console
-    console.log(`Delegation issued: ${result.delegation_id}`);
-    // eslint-disable-next-line no-console
-    console.log(`Plugin: ${cmd.plugin} / ${cmd.tool}   Scope: ${cmd.scope}`);
-    // eslint-disable-next-line no-console
-    console.log(`Expires: ${cmd.expires}`);
-    // eslint-disable-next-line no-console
-    console.log('');
-    // eslint-disable-next-line no-console
-    console.log(`Blob (base64url, share this with the peer):`);
-    // eslint-disable-next-line no-console
-    console.log(result.blob);
-    if (result.qrPngBase64) {
-      // eslint-disable-next-line no-console
-      console.log('');
-      // eslint-disable-next-line no-console
-      console.log(`QR (base64 PNG, ${result.qrPngBase64.length} chars):`);
-      // eslint-disable-next-line no-console
-      console.log(result.qrPngBase64);
-    } else {
-      // eslint-disable-next-line no-console
-      console.log('');
-      // eslint-disable-next-line no-console
-      console.log(`(QR generation skipped — blob is the authoritative transport)`);
-    }
+    printDelegateResult(
+      {
+        delegation_id: result.delegation_id,
+        blob: result.blob,
+        issuer: '',
+        ...(result.qrPngBase64 ? { qr_png_base64: result.qrPngBase64 } : {}),
+      },
+      cmd.plugin,
+      cmd.tool,
+      cmd.scope,
+      cmd.expires,
+    );
     return 0;
   }
 
-  if (cmd.kind === 'delegate-list') {
-    const { masterKey, dbPath } = await resolveIdentityContext(
-      cmd.dbPath,
-      cmd.masterKeyHex,
-      undefined,
-    );
-    const rows = await cmdListGranted(dbPath, masterKey);
-    // eslint-disable-next-line no-console
-    console.log(
-      `${'ID'.padEnd(38)} ${'Plugin'.padEnd(22)} ${'Tool'.padEnd(16)} ${'Scope'.padEnd(18)} ${'Expires'.padEnd(22)} ${'Revoked'}`,
-    );
-    for (const r of rows) {
-      // eslint-disable-next-line no-console
-      console.log(
-        `${r.delegation_id.padEnd(38)} ${r.plugin.padEnd(22)} ${r.tool.padEnd(16)} ${r.scope.padEnd(18)} ${r.expires_at.padEnd(22)} ${r.revoked === 1 ? 'yes' : 'no'}`,
-      );
-    }
-    // eslint-disable-next-line no-console
-    console.log(`\n${rows.length} delegation(s).`);
+  if (cmd.kind === 'delegate-list' || cmd.kind === 'delegation-list') {
+    const data = await loadDelegations(cmd);
+    printDelegations(data, cmd.common.format, cmd.common.filter);
     return 0;
   }
 
@@ -759,29 +967,20 @@ async function handleSubcommand(
     return 0;
   }
 
-  if (cmd.kind === 'delegation-list') {
-    const { masterKey, dbPath } = await resolveIdentityContext(
-      cmd.dbPath,
-      cmd.masterKeyHex,
-      undefined,
-    );
-    const rows = await cmdListReceived(dbPath, masterKey);
-    // eslint-disable-next-line no-console
-    console.log(
-      `${'ID'.padEnd(38)} ${'Peer'.padEnd(16)} ${'Plugin'.padEnd(22)} ${'Tool'.padEnd(16)} ${'Scope'.padEnd(18)} ${'Expires'.padEnd(22)} ${'Revoked'}`,
-    );
-    for (const r of rows) {
-      // eslint-disable-next-line no-console
-      console.log(
-        `${r.delegation_id.padEnd(38)} ${r.peer_hub_name.padEnd(16)} ${r.plugin.padEnd(22)} ${r.tool.padEnd(16)} ${r.scope.padEnd(18)} ${r.expires_at.padEnd(22)} ${r.revoked === 1 ? 'yes' : 'no'}`,
-      );
-    }
-    // eslint-disable-next-line no-console
-    console.log(`\n${rows.length} delegation(s).`);
-    return 0;
-  }
-
   if (cmd.kind === 'delegation-revoke') {
+    const http = await maybeFederationHttp(cmd.common);
+    if (http) {
+      let result: RevokeHttpResult;
+      try {
+        result = await http.revokeDelegation(cmd.delegationId);
+      } catch (err) {
+        if (err instanceof FederationHttpError) throw err;
+        throw new Error(`revoke via hub failed: ${(err as Error).message}`);
+      }
+      // eslint-disable-next-line no-console
+      console.log(`Revoked: ${result.delegation_id}`);
+      return 0;
+    }
     const { masterKey, dbPath } = await resolveIdentityContext(
       cmd.dbPath,
       cmd.masterKeyHex,
