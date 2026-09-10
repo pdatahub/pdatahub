@@ -1,0 +1,71 @@
+# pdatahub Docker Compose — one-liner setup for local development.
+#
+# Usage:
+#   cp .env.example .env          # optional: pre-set HUB_API_TOKEN
+#   docker compose up
+#   → Hub available at http://localhost:8080
+#   → First-run mnemonic + API token printed to docker compose logs
+#
+# Add your own plugins:
+#   mkdir -p plugins/google-calendar
+#   pdatahub-hub plugin install https://github.com/pdatahub/pdatahub-plugin-google-calendar/releases/latest/download/...
+#   docker compose restart hub
+
+services:
+  hub:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: pdatahub/hub:local
+    container_name: pdatahub-hub
+    restart: unless-stopped
+    ports:
+      # HTTP API + WebSocket approval stream.
+      # For local dev: 8080 is fine. For multi-user / public access, put
+      # this behind a reverse proxy (Caddy / nginx / Cloudflare Tunnel)
+      # that terminates TLS and adds rate limiting.
+      - "127.0.0.1:8080:8080"
+    volumes:
+      # Persistent storage for SQLite + vault.
+      # DO NOT delete this volume unless you want to lose all OAuth tokens.
+      - hub-data:/data
+      # Plugins directory. Mount your own plugin folders here.
+      # See README "Adding plugins" section.
+      - ./plugins:/plugins:rw
+    environment:
+      HUB_HOST: 0.0.0.0
+      HUB_PORT: 8080
+      HUB_DB_PATH: /data/pdatahub-hub.db
+      HUB_PLUGINS_DIR: /plugins
+      HUB_LOG_LEVEL: info
+      # HUB_MASTER_KEY: unset → entrypoint generates + persists to /data/.env
+      # For production, override here OR pass via secrets manager:
+      #   HUB_MASTER_KEY: ${SECRET_HUB_MASTER_KEY}
+      HUB_API_TOKEN: ${HUB_API_TOKEN:-}
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Optional: cloudflared sidecar for HTTPS OAuth callbacks when remote APIs
+  # (Slack, Notion, etc.) refuse http://localhost redirect URIs.
+  # Uncomment + set TUNNEL_TOKEN to enable.
+  # tunnel:
+  #   image: cloudflare/cloudflared:latest
+  #   command: tunnel --no-autoupdate run
+  #   environment:
+  #     TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN}
+  #   depends_on:
+  #     hub:
+  #       condition: service_healthy
+
+volumes:
+  hub-data:
+    name: pdatahub-hub-data

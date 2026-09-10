@@ -1,0 +1,53 @@
+# Build artifacts
+**/dist/
+**/build/
+**/coverage/
+**/.turbo/
+**/node_modules/
+**/out/
+
+# Test outputs
+**/.vitest-cache/
+**/coverage/
+
+# Env / secrets — never bake into images
+.env
+.env.*
+!.env.example
+**/.env.local
+
+# Source plugins (mounted as volume in compose instead)
+plugins/
+
+# Runtime data (mounted as volume)
+data/
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+*.swp
+*.swo
+
+# Git / meta
+.git/
+.gitignore
+.github/dependabot.yml
+
+# Docs that aren't needed in image
+README.md
+CHANGELOG.md
+**/*.md
+docs/
+
+# Docker meta (avoid recursive copy)
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Whitelist the entrypoint script (everything else in scripts/ is dev tooling)
+!scripts/docker-entrypoint.sh
