@@ -64,6 +64,14 @@ export interface HubConfig {
    * Set fixed when OAuth provider requires exact redirect_uri match (Google Web-app).
    */
   oauthCallbackPort: number;
+  /**
+   * Rate limit per (client IP, route_class). Refill rate in tokens/minute.
+   * 0 disables rate limiting entirely (escape hatch for tests/dev).
+   * Default 60.
+   */
+  rateLimitPerMinute: number;
+  /** Burst capacity for the rate limiter. Default = rateLimitPerMinute. */
+  rateLimitBurst: number;
 }
 
 interface CliArgs {
@@ -319,6 +327,8 @@ export function loadConfig(argv: string[] = process.argv.slice(2)): HubConfig {
     pluginIdleTimeoutMs: 5 * 60_000, // 5 min
     pluginHeartbeatMs: 30_000, // 30 sec
     oauthCallbackPort,
+    rateLimitPerMinute: parseInt(process.env.HUB_RATE_LIMIT_PER_MIN ?? '60', 10),
+    rateLimitBurst: parseInt(process.env.HUB_RATE_LIMIT_BURST ?? '60', 10),
   };
 }
 
@@ -371,6 +381,8 @@ export async function loadConfigAsync(
     pluginIdleTimeoutMs: 5 * 60_000, // 5 min
     pluginHeartbeatMs: 30_000, // 30 sec
     oauthCallbackPort,
+    rateLimitPerMinute: parseInt(process.env.HUB_RATE_LIMIT_PER_MIN ?? '60', 10),
+    rateLimitBurst: parseInt(process.env.HUB_RATE_LIMIT_BURST ?? '60', 10),
   };
 }
 

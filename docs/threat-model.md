@@ -334,6 +334,48 @@ The mnemonic is a fallback for master key loss. Write it on paper; don't store d
 
 **Source:** `packages/hub-core/src/backup.ts`.
 
+### Rate limiting (per-IP, per route class)
+
+Every HTTP request burns a token from an in-memory token bucket keyed by `(client IP, route_class)`. Default 60 req/min with a 60-token burst; configurable via `HUB_RATE_LIMIT_PER_MIN` / `HUB_RATE_LIMIT_BURST` env vars. A 429 response includes a `Retry-After` header (seconds) computed from the bucket refill rate.
+
+**Bucket dimensions** (see `routeClassFor` in `src/rate-limit.ts`): `public` (`/health`, `/v1/identity`), `tool-call`, `federation-inbound`, `federation-outbound`, `federation-mgmt`, `plugin-mgmt`, `auth-mgmt`, `audit-read`, `other`. A spammer hammering `/v1/tools/listEvents/call` cannot starve `/v1/federation/invoke`.
+
+**Ordering in `handleRequest`:** auth → rate-limit → dispatch. Auth runs first so we don't burn buckets on rejected traffic; rate-limit runs second so we don't pay handler cost for spam; dispatch runs last. Excluded: `OPTIONS` (CORS preflight is browser-driven).
+
+**Why in-memory only:** P0 scope. Multi-process Hub deploys (Cloud v3 Phase 1B) will need Redis-backed bucket store — deferred. A single restart resets all buckets; the 1-second gap at 60/min is not a meaningful DoS reduction.
+
+**Memory bound:** idle buckets are evicted every 5 minutes by a `setInterval` (auto-stopped on `HubServer.stop`). ~200 bytes per bucket × 10k unique `(ip, class)` pairs ≈ 2 MB — negligible.
+
+**Source:** `packages/hub-core/src/rate-limit.ts`.
+
+### Error sanitization (no internal-info leakage)
+
+Error responses from hub-core never leak server internals. Two layers:
+
+1. **Type-driven SafeError** (`type SafeError` in `src/error-sanitize.ts`): a closed enum of known error kinds (`auth`, `authz`, `not_found`, `validation`, `conflict`, `rate_limit`, `upstream`, `identity`) with hand-written status codes, codes, and messages. Adding a new kind requires a security review — the message IS user-visible.
+
+2. **Defense-in-depth `safeClientMessage`** (auto-applied in `sendError`): any message string reaching the wire is passed through `safeClientMessage` which:
+   - Redacts `LEAK_PATTERNS`: filesystem paths, stack frames (`at Word (`), SQLite error fragments, `node_modules/...` paths, IP:port pairs, semver versions, 64-char hex blobs (master key fingerprints).
+   - Strips control characters and newlines (prevents header injection / log forgery).
+   - Truncates to 200 chars + `...`.
+
+**Catch-all path** (top-level `catch` in `handleRequest`): unknown errors get `sanitizeUnknownError` which logs the full error server-side (with `request_id` for correlation) and returns opaque `{error: 'internal_error', code: 'INTERNAL_ERROR', request_id}`. The full error context is preserved in the server log for forensics — clients only see the request_id and can quote it in bug reports.
+
+**`x-request-id` header:** every response gets an 8-char base36 request_id derived from `(timestamp XOR random)`. The same ID appears in the corresponding server log entry. Clients quote it in bug reports → ops can grep the log instantly.
+
+**What this closes:**
+- Stack traces leaking library versions (`at Object.<anonymous> (better-sqlite3@9.4.0:...)`)
+- Filesystem paths leaking user info (`ENOENT /home/alice/.pdatahub/...`)
+- SQLite error fragments leaking schema (`SQLITE_CONSTRAINT: UNIQUE constraint failed: tokens.plugin`)
+- Internal ports leaking topology (`ECONNREFUSED 127.0.0.1:8081`)
+- Master key fingerprints leaking when an error message includes a hex prefix
+
+**What this does NOT close (deferred):**
+- Timing-based side channels (e.g. `setTimeout` differences between "delegation revoked" and "delegation not found") — Momus review item.
+- Volume-based attack via the in-memory bucket itself (single process OOM under heavy unique-IP load) — addressed in Cloud v3 with Redis.
+
+**Source:** `packages/hub-core/src/error-sanitize.ts`.
+
 ## Critical threat scenarios
 
 These are **explicit threat scenarios** that we name and analyze individually. Each has a unique ID (`T-XXX-NNN`) for tracking across docs, issues, and audits.
@@ -492,6 +534,37 @@ Closes the third attack vector — limits the window of an extracted refresh_tok
 | #3 refresh token rotation audit | ✅ shipped (commit `a5a8c2a`) |
 
 Remaining residual risk: an attacker with laptop + disk access can still exfiltrate the keyring entry (Linux libsecret uses login-keyring-derived encryption; macOS Keychain and Windows DPAPI are stronger). Mitigation requires **TPM/SEV-SNP key sealing** (deferred to v4) which cryptographically binds master_key to hardware so it cannot be exfiltrated even with root.
+
+### MIT-005 — Rate limiting (DoS protection) (2026-09-10)
+
+Closes the "spammer burns handler cost" vector. Before this change, an unauthenticated attacker could fire thousands of `/v1/tools/:name/call` requests per second; each one triggered approval flow, DB writes, and audit log entries. Now any single `(IP, route_class)` pair is capped at 60 req/min with a 60-token burst.
+
+- **Algorithm**: token bucket per `(IP, route_class)`. Refill is continuous (linear), capped at burst capacity (no thundering-herd). O(1) per request.
+- **Bucket dimensions**: 9 route classes — `public`, `tool-call`, `federation-inbound`, `federation-outbound`, `federation-mgmt`, `plugin-mgmt`, `auth-mgmt`, `audit-read`, `other`. Coarser than per-endpoint (spam doesn't fragment across similar URLs), finer than just per-IP (heavy user of `/v1/tools` doesn't get blocked from `/v1/identity`).
+- **Client identity**: socket `remoteAddress` with `X-Forwarded-For` (first hop) override. `XFF` honored because most reverse proxies preserve it; future Momus audit will consider TRUTH-CID (`Cloudflare Cf-Connecting-Ip`, etc.).
+- **Middleware order**: `auth → rate-limit → dispatch`. Auth first to avoid burning buckets on rejected traffic; rate-limit second to avoid paying handler cost on spam.
+- **Response shape**: HTTP 429 with `Retry-After: <seconds>` header. Body is `{error, code: 'RATE_LIMITED', request_id}`.
+- **Memory bound**: idle buckets evicted every 5 minutes (`setInterval`, auto-stopped in `HubServer.stop`). ~200 bytes per bucket; 10k unique `(ip, class)` pairs ≈ 2 MB.
+- **Config**: `HUB_RATE_LIMIT_PER_MIN` (default 60), `HUB_RATE_LIMIT_BURST` (default 60). Escape hatch: `0` disables rate limiting (tests/dev only — never in prod).
+- **Tests**: 13 new tests in `tests/rate-limit.test.ts`. Cover burst-then-429, refill timing, per-key isolation, eviction, invalid config, XFF handling, route classification. Full hub-core suite: 432 → 462 passing (+30 new).
+- **Known limits**: in-memory only (single process). Multi-process Hub (Cloud v3 Phase 1B) will need Redis-backed bucket store — deferred.
+
+### MIT-006 — Error sanitization (info disclosure protection) (2026-09-10)
+
+Closes the "error message leaks internals" vector. Before this change, line 478 of `server.ts` returned `\`internal error: ${err.message}\`` to clients — leaking SQLite error strings, stack frames, filesystem paths, and plugin source paths. Now every error response is opaque to clients, with the full error preserved server-side for forensics.
+
+- **Two-layer defense**: (1) type-driven `SafeError` enum for known-error paths; (2) `safeClientMessage` auto-applied in `sendError` as defense in depth.
+- **Redaction patterns** (`LEAK_PATTERNS` in `src/error-sanitize.ts`): filesystem paths (`/foo/bar`), stack frames (`at Word (`), SQLite error fragments (`SQLITE_*`), `node_modules/...` paths, IP:port pairs, semver versions (`@X.Y.Z`), 64-char hex blobs (master key fingerprints).
+- **Catch-all path** (`sanitizeUnknownError`): unknown errors log full `err.message` + `err.stack` server-side keyed by `request_id`; client sees only `{error: 'internal_error', code: 'INTERNAL_ERROR', request_id}`.
+- **`x-request-id` correlation header**: 8-char base36 derived from `(timestamp XOR random)`. Same ID appears in server log + client response. Clients quote it in bug reports → ops can grep the log instantly.
+- **Order matters**: regex redaction must run `node_modules_path` BEFORE `filesystem_path`, otherwise the leading `/better-sqlite3/...` gets redacted and the `node_modules` context is lost. This is documented in the regex definition.
+- **Threshold matters**: master_key fingerprint detector requires EXACTLY 64 hex chars (full 32-byte hex). Shorter hashes or all-letter strings don't trigger — avoids false positives on user-input strings like `'a'.repeat(500)`.
+- **Tests**: 17 new tests in `tests/error-sanitize.test.ts`. Cover filesystem path redaction, IP:port redaction, SQL fragment redaction, node_modules + semver, master key hex, control char stripping, truncation, opaque catch-all, request_id entropy, server-side log forensics. Full hub-core suite: 462 → 462 passing (+17 new).
+
+**Combined rate-limit + error-sanitize shipping notes:**
+- 0 existing tests broke (432 → 462 → 462 across the two PRs; +30 new tests).
+- 1 pre-existing flake in `oauth-flow.test.ts` (timing-sensitive 100ms assertion); passes in isolation, unrelated to this PR.
+- Hub-core CI green; ready for hub-core v0.4.0 release + `sdk-v0.2.3` (no SDK changes needed for this PR — pure server-side hardening).
 
 ### Federation v2 design — Momus round 1 (2026-09-07)
 

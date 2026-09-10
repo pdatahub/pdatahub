@@ -55,6 +55,14 @@ import {
 } from './federation/delegation.js';
 import { NonceStore } from './federation/nonces.js';
 import { logger } from './logger.js';
+import { RateLimiter, DEFAULT_RATE_LIMIT, routeClassFor, clientIp, startRateLimiterEviction } from './rate-limit.js';
+import {
+  sanitizeUnknownError,
+  generateRequestId,
+  safeClientMessage,
+  type SafeError,
+  type SanitizedErrorResponse,
+} from './error-sanitize.js';
 
 /**
  * Per-route authentication strategy.
@@ -236,6 +244,13 @@ export interface HubServerOptions {
    *  with tests that don't exercise federation. */
   delegations?: DelegationStore;
   nonces?: NonceStore;
+  /**
+   * Rate limiter for local + federation endpoints. If omitted, a default
+   * 60 req/min per (IP, route_class) limiter is constructed. Pass a shared
+   * instance if you want to share state across multiple HubServer instances
+   * (e.g. in test harnesses) or if you want custom limits.
+   */
+  rateLimiter?: RateLimiter;
 }
 
 export class HubServer {
@@ -243,6 +258,10 @@ export class HubServer {
   private server: Server | null = null;
   /** Default user_id for single-user self-hosted MVP. */
   private readonly defaultUserId = 'local-user';
+  /** P0 — rate limiter (in-memory, per-IP+route_class). */
+  private readonly rateLimiter: RateLimiter;
+  /** Background timer for idle bucket eviction. Held to allow stop(). */
+  private rateLimitEvictTimer: NodeJS.Timeout | null = null;
 
   /**
    * Phase 3 (Momus I5) — per-(peer_verify_key, agent_id) rate limit.
@@ -258,6 +277,7 @@ export class HubServer {
 
   constructor(opts: HubServerOptions) {
     this.opts = opts;
+    this.rateLimiter = opts.rateLimiter ?? new RateLimiter(DEFAULT_RATE_LIMIT);
   }
 
   /**
@@ -273,6 +293,10 @@ export class HubServer {
           port: this.opts.config.port,
           ws_path: '/approval-stream',
         });
+        // Evict idle rate-limit buckets every 5 min to bound memory.
+        if (this.rateLimitEvictTimer === null) {
+          this.rateLimitEvictTimer = startRateLimiterEviction(this.rateLimiter, 5 * 60_000);
+        }
         resolve();
       });
     });
@@ -283,6 +307,10 @@ export class HubServer {
    */
   stop(): Promise<void> {
     return new Promise((resolve) => {
+      if (this.rateLimitEvictTimer !== null) {
+        clearInterval(this.rateLimitEvictTimer);
+        this.rateLimitEvictTimer = null;
+      }
       this.opts.approval.close().then(() => {
         if (this.server) {
           this.server.close(() => resolve());
@@ -369,8 +397,26 @@ export class HubServer {
       return;
     }
 
+    // Rate limit (after auth so we don't burn buckets on rejected traffic,
+    // before dispatch so we don't pay handler cost for spam).
+    const urlForRate = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+    const routeClass = routeClassFor(req.method ?? 'GET', urlForRate.pathname);
+    const ip = clientIp(req);
+    const rl = this.rateLimiter.consume(ip, routeClass);
+    if (!rl.allowed) {
+      const retrySeconds = Math.ceil(rl.retryAfterMs / 1000);
+      res.setHeader('retry-after', String(retrySeconds));
+      this.sendError(res, 429, `rate limit exceeded; retry after ${retrySeconds}s`, 'RATE_LIMITED');
+      return;
+    }
+
+    // Mint a request_id for log correlation. Surfaced in error responses
+    // so clients can quote it in bug reports.
+    const requestId = generateRequestId();
+    res.setHeader('x-request-id', requestId);
+
     try {
-      const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+      const url = urlForRate;
 
       // /v1/tools
       if (req.method === 'GET' && url.pathname === '/v1/tools') {
@@ -474,8 +520,11 @@ export class HubServer {
 
       this.sendError(res, 404, `not found: ${req.method} ${url.pathname}`, 'NOT_FOUND');
     } catch (err) {
-      logger.error('request handler error', { error: (err as Error).message });
-      this.sendError(res, 500, `internal error: ${(err as Error).message}`, 'INTERNAL_ERROR');
+      // Sanitize: never leak stack/path/SQL/library-version to clients.
+      // Full context is logged server-side keyed by request_id for forensics.
+      const safe = sanitizeUnknownError(err, requestId, (msg, ctx) => logger.error(msg, ctx));
+      const status = (err as { safe?: SafeError }).safe?.status ?? 500;
+      this.sendSanitizedError(res, status, safe);
     }
   }
 
@@ -2171,8 +2220,25 @@ export class HubServer {
     message: string,
     code: string,
   ): void {
-    const body: HubErrorResponse = { error: message, code };
+    // Defense in depth — strip control chars / overlong / stack-like
+    // patterns from any message reaching the wire, even if a caller
+    // forgot to use safeClientMessage upstream.
+    const body: HubErrorResponse = { error: safeClientMessage(message), code };
     this.sendJson(res, status, body);
+  }
+
+  /**
+   * Send a fully sanitized error response (used by the catch-all path).
+   * Body shape is the canonical `{error, code, request_id}` — no raw
+   * `err.message` is ever included. The full error is logged elsewhere
+   * keyed by `safe.request_id`.
+   */
+  private sendSanitizedError(
+    res: ServerResponse,
+    status: number,
+    safe: SanitizedErrorResponse,
+  ): void {
+    this.sendJson(res, status, safe);
   }
 }
 
