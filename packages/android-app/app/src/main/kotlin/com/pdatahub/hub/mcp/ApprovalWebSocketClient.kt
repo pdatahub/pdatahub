@@ -150,10 +150,11 @@ class ApprovalWebSocketClient @Inject constructor(
             _state.value = ApprovalStreamState.CONNECTING
             val hubCoreUrl = settings.hubCoreUrl
             val token = settings.hubCoreAuthToken
+            val tokenParam = if (token.isNotBlank()) "?token=${java.net.URLEncoder.encode(token, "UTF-8")}" else ""
             val wsUrl = hubCoreUrl
                 .replace("http://", "ws://")
                 .replace("https://", "wss://")
-                .trimEnd('/') + "/approval-stream"
+                .trimEnd('/') + "/approval-stream$tokenParam"
 
             val request = Request.Builder()
                 .url(wsUrl)
