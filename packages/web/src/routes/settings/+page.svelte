@@ -23,10 +23,12 @@
   import { page } from '$app/stores';
   import { api, HubError } from '$lib/api';
   import { session, setApiToken } from '$lib/stores/session';
-  import type { IdentityResponse } from '$lib/types';
+  import type { IdentityResponse, StatusResponse } from '$lib/types';
 
   let identity = $state<IdentityResponse | null>(null);
   let identityError = $state<string | null>(null);
+  let status = $state<StatusResponse | null>(null);
+  let statusError = $state<string | null>(null);
   let tokenInput = $state('');
   let saving = $state(false);
   let saveError = $state<string | null>(null);
@@ -38,6 +40,14 @@
       identity = await api.identity();
     } catch (err) {
       identityError = err instanceof Error ? err.message : 'unknown';
+    }
+    // Status is bearer-authenticated — only fetch when we have a token.
+    if ($session.apiToken) {
+      try {
+        status = await api.status();
+      } catch (err) {
+        statusError = err instanceof Error ? err.message : 'unknown';
+      }
     }
   });
 
@@ -88,6 +98,16 @@
       // clipboard API might be unavailable — non-fatal
     }
   }
+
+  function formatUptime(seconds: number): string {
+    if (seconds < 60) return `${seconds}s`;
+    const m = Math.floor(seconds / 60);
+    if (m < 60) return `${m}m`;
+    const h = Math.floor(m / 60);
+    if (h < 24) return `${h}h ${m % 60}m`;
+    const d = Math.floor(h / 24);
+    return `${d}d ${h % 24}h`;
+  }
 </script>
 
 <svelte:head>
@@ -122,6 +142,64 @@
       <p class="muted">Loading hub info…</p>
     {/if}
   </article>
+
+  {#if $session.apiToken}
+    <article class="card">
+      <h2>System</h2>
+      {#if status}
+        <dl>
+          <dt>Hub URL</dt>
+          <dd><code>{window.location.origin}</code></dd>
+          <dt>Version</dt>
+          <dd>v{status.hub_version}</dd>
+          <dt>Uptime</dt>
+          <dd>{formatUptime(status.uptime_sec)}</dd>
+          <dt>Plugins installed</dt>
+          <dd>
+            <code>{status.plugin_count}</code>
+            {#if status.plugin_count === 0}
+              <span class="hint-inline">— install one in the <a href="/plugins">Plugins</a> tab</span>
+            {/if}
+          </dd>
+          <dt>WebSocket clients</dt>
+          <dd>
+            <code>{status.ws_clients}</code>
+            <span class="hint-inline">— phones + web UIs connected to approval stream</span>
+          </dd>
+          <dt>Audit entries</dt>
+          <dd><code>{status.audit_count}</code></dd>
+          <dt>Federation</dt>
+          <dd>
+            {#if status.federation_enabled}
+              <span class="badge badge-on">enabled</span>
+            {:else}
+              <span class="badge badge-off">identity-only</span>
+            {/if}
+          </dd>
+          <dt>Rate limit</dt>
+          <dd>
+            {#if status.rate_limit_enabled}
+              <span class="badge badge-on">enabled</span>
+            {:else}
+              <span class="badge badge-off">disabled</span>
+            {/if}
+          </dd>
+        </dl>
+        <p class="hint">
+          Auto-refreshes on page load. Federation status reflects the in-memory
+          delegation store — grants you issue are listed in <code>/v1/federation/delegations</code>.
+        </p>
+      {:else if statusError}
+        <p class="error">Could not load system status: {statusError}</p>
+        <p class="hint">
+          Status is bearer-authenticated. If you just added the token above,
+          the page will refresh it on next mount.
+        </p>
+      {:else}
+        <p class="muted">Loading system status…</p>
+      {/if}
+    </article>
+  {/if}
 
   <article class="card">
     <h2>API token</h2>
@@ -331,5 +409,28 @@ docker logs pdatahub-hub 2&gt;&amp;1 | grep 'API TOKEN' -A 1</code></pre>
     display: block;
     word-break: break-all;
     margin-bottom: var(--space-2);
+  }
+  .badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: var(--radius-pill);
+    font-size: 11px;
+    font-weight: 600;
+  }
+  .badge-on {
+    background: rgba(74, 222, 128, 0.15);
+    color: var(--success, #4ade80);
+  }
+  .badge-off {
+    background: rgba(148, 163, 184, 0.15);
+    color: var(--fg-dim);
+  }
+  .hint-inline {
+    color: var(--fg-mute);
+    font-size: 12px;
+    margin-left: var(--space-2);
+  }
+  .hint-inline a {
+    color: var(--accent);
   }
 </style>

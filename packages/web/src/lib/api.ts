@@ -17,6 +17,7 @@ import type {
   IdentityResponse,
   ListAuditResponse,
   ListToolsResponse,
+  StatusResponse,
 } from './types';
 import { getApiToken } from './stores/session';
 
@@ -82,6 +83,8 @@ export const api = {
   health: () => request<HealthResponse>('/health'),
 
   identity: () => request<IdentityResponse>('/v1/identity'),
+
+  status: () => request<StatusResponse>('/v1/status'),
 
   listTools: () => request<ListToolsResponse>('/v1/tools'),
 

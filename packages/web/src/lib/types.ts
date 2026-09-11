@@ -14,6 +14,16 @@ export interface IdentityResponse {
   fingerprint?: string;
 }
 
+export interface StatusResponse {
+  uptime_sec: number;
+  plugin_count: number;
+  ws_clients: number;
+  audit_count: number;
+  federation_enabled: boolean;
+  rate_limit_enabled: boolean;
+  hub_version: string;
+}
+
 export interface HealthResponse {
   status: 'ok';
   service: string;

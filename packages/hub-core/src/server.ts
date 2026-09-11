@@ -92,6 +92,7 @@ export interface RouteAuth {
 export const routeAuth: RouteAuth[] = [
   { method: 'GET', path: '/health', auth: 'none' },
   { method: 'GET', path: '/v1/identity', auth: 'none' },
+  { method: 'GET', path: '/v1/status', auth: 'bearer' },
   { method: 'GET', path: '/v1/tools', auth: 'bearer' },
   { method: 'POST', path: '/v1/tools/:name/call', auth: 'bearer' },
   // Phase 5 — B-side endpoint where mcp-server invokes a federated tool.
@@ -259,6 +260,8 @@ export class HubServer {
   private server: Server | null = null;
   /** Default user_id for single-user self-hosted MVP. */
   private readonly defaultUserId = 'local-user';
+  /** Hub start time — used for /v1/status uptime. */
+  private readonly startedAt = Date.now();
   /** P0 — rate limiter (in-memory, per-IP+route_class). */
   private readonly rateLimiter: RateLimiter;
   /** Background timer for idle bucket eviction. Held to allow stop(). */
@@ -535,6 +538,14 @@ export class HubServer {
         return;
       }
 
+      // /v1/status — operational status for the web UI Settings page.
+      // Bearer-authenticated: leaks plugin count + WS client count to
+      // unauthenticated callers otherwise.
+      if (req.method === 'GET' && url.pathname === '/v1/status') {
+        await this.handleGetStatus(res);
+        return;
+      }
+
       // /v1/federation/call — Phase 3. Inbound from peer hubs, signed with
       // Ed25519. Reads raw body (signature is over the exact bytes sent,
       // not a re-serialized object).
@@ -695,6 +706,35 @@ export class HubServer {
         'IDENTITY_LOAD_FAILED',
       );
     }
+  }
+
+  /**
+   * Aggregated operational status for the Settings page. Cheap to compute
+   * (in-memory only) — safe to call frequently for live "uptime" counters.
+   *
+   * Fields:
+   *   - uptime_sec: seconds since this HubServer instance was constructed
+   *   - plugin_count: live plugin subprocess count
+   *   - ws_clients: connected WebSocket clients (Android phones / web UI)
+   *   - audit_count: total audit log rows (read from SQLite COUNT(*))
+   *   - federation_enabled: true when a delegation store is wired
+   *   - rate_limit_enabled: false when HUB_RATE_LIMIT_PER_MIN=0
+   */
+  private handleGetStatus(res: ServerResponse): void {
+    const plugins = this.opts.registry.listPlugins();
+    const auditCount = (this.opts.db
+      .prepare('SELECT COUNT(*) as n FROM audit_log')
+      .get() as { n: number }).n;
+    this.sendJson(res, 200, {
+      uptime_sec: Math.floor((Date.now() - this.startedAt) / 1000),
+      plugin_count: plugins.length,
+      ws_clients: this.opts.approval.connectedClients(),
+      audit_count: auditCount,
+      federation_enabled: this.opts.delegations !== undefined,
+      rate_limit_enabled: this.opts.rateLimiter !== undefined &&
+        this.opts.config.rateLimitPerMinute > 0,
+      hub_version: '0.3.0',
+    });
   }
 
   private async handleCallTool(
