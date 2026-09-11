@@ -39,7 +39,7 @@ describe('audit_log migration v6 — Plugin SDK v2', () => {
   it('fresh DB applies v6 + adds error_class + error_code columns', () => {
     expect(readUserVersion()).toBe(0);
     runMigrations(db);
-    expect(readUserVersion()).toBe(7);
+    expect(readUserVersion()).toBe(8);
 
     const cols = db.prepare('PRAGMA table_info(audit_log)').all() as Array<{ name: string }>;
     const names = cols.map((c) => c.name);
@@ -94,7 +94,7 @@ describe('audit_log migration v6 — Plugin SDK v2', () => {
 
     runMigrations(db);
 
-    expect(readUserVersion()).toBe(7);
+    expect(readUserVersion()).toBe(8);
     const cols = db.prepare('PRAGMA table_info(audit_log)').all() as Array<{ name: string }>;
     const names = cols.map((c) => c.name);
     expect(names).toContain('actor_type');

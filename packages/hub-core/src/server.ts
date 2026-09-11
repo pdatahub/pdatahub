@@ -240,8 +240,20 @@ export interface HubServerOptions {
   tokens: TokenVault;
   oauth: OAuthFlow;
   approval: ApprovalStream;
-  /** Map plugin name → client_id/secret (from env or config). */
+  /** Map plugin name → client_id/secret (from env or config).
+   *
+   *  Legacy source — loaded from env vars at startup (`loadClientCredentialsFromEnv`
+   *  in `index.ts`). Takes priority over `oauthCredentials` if both have the same
+   *  plugin, so env-var-based deployments keep working unchanged.
+   *
+   *  For new setups, prefer `oauthCredentials` (DB-backed) so the web UI
+   *  can manage credentials via `PUT /v1/plugins/:name/oauth/credentials`
+   *  without restarting the hub. */
   clientCredentials: Map<string, PluginClientConfig>;
+  /** OAuth UI (v0.4) — persistent, encrypted credentials store. Optional
+   *  for backward compat with tests. When provided, `resolveClientCredentials()`
+   *  checks this store as a fallback after `clientCredentials` Map. */
+  oauthCredentials?: import('./plugin-oauth-store.js').PluginOAuthStore;
   /** Phase 3 — delegations + replay dedup. Optional for backwards compat
    *  with tests that don't exercise federation. */
   delegations?: DelegationStore;
@@ -512,6 +524,48 @@ export class HubServer {
       const authMatch = url.pathname.match(/^\/v1\/plugins\/([^/]+)\/authenticate$/);
       if (req.method === 'POST' && authMatch) {
         await this.handleAuthenticatePlugin(res, decodeURIComponent(authMatch[1]));
+        return;
+      }
+      // /v1/plugins/:name/oauth/status — read-only. Returns configured/
+      // connected flags so the web UI can render a status indicator
+      // without exposing client_secret material.
+      const oauthStatusMatch = url.pathname.match(
+        /^\/v1\/plugins\/([^/]+)\/oauth\/status$/,
+      );
+      if (req.method === 'GET' && oauthStatusMatch) {
+        await this.handleOAuthStatus(
+          res,
+          decodeURIComponent(oauthStatusMatch[1]),
+        );
+        return;
+      }
+      // /v1/plugins/:name/oauth/credentials — write. Stores encrypted
+      // client_id + optional client_secret in the OAuth credentials
+      // store. Accepts either { client_id, client_secret } or
+      // { google_oauth_client_json } (Google's standard JSON dump).
+      const oauthCredsMatch = url.pathname.match(
+        /^\/v1\/plugins\/([^/]+)\/oauth\/credentials$/,
+      );
+      if (req.method === 'PUT' && oauthCredsMatch) {
+        await this.handlePutOAuthCredentials(
+          req,
+          res,
+          decodeURIComponent(oauthCredsMatch[1]),
+        );
+        return;
+      }
+      // /v1/plugins/:name/oauth/start — initiate the OAuth dance and
+      // return the authorization_url for the web UI to open in a popup.
+      // The plugin MUST have credentials configured (or in env vars) —
+      // otherwise 400 NO_CREDENTIALS.
+      const oauthStartMatch = url.pathname.match(
+        /^\/v1\/plugins\/([^/]+)\/oauth\/start$/,
+      );
+      if (req.method === 'POST' && oauthStartMatch) {
+        await this.handleStartOAuth(
+          res,
+          decodeURIComponent(oauthStartMatch[1]),
+        );
         return;
       }
       // /v1/tokens
@@ -794,7 +848,7 @@ export class HubServer {
       // Proactive refresh: if access_token expires within 5 minutes, swap it
       // for a fresh one via refresh_token. Prevents 401 mid-call.
       if (this.opts.tokens.isExpiringSoon(grant.plugin)) {
-        const clientCreds = this.opts.clientCredentials.get(grant.plugin);
+        const clientCreds = this.resolveClientCredentials(grant.plugin);
         if (clientCreds) {
           try {
             await this.opts.tokens.refreshAccessToken(
@@ -1059,13 +1113,185 @@ export class HubServer {
       this.sendError(res, 400, 'plugin does not require OAuth', 'NO_OAUTH_CONFIG');
       return;
     }
-    const client = this.opts.clientCredentials.get(pluginName);
+    const client = this.resolveClientCredentials(pluginName);
     if (!client) {
       this.sendError(
         res,
         500,
         `no client credentials configured for plugin ${pluginName} (set HUB_CLIENT_${pluginName.toUpperCase().replace(/-/g, '_')}_ID env or config)`,
         'MISSING_CREDENTIALS',
+      );
+      return;
+    }
+    try {
+      const result = await this.opts.oauth.startFlow({
+        plugin: pluginName,
+        oauth: plugin.oauth,
+        client,
+      });
+      this.sendJson(res, 200, result);
+    } catch (err) {
+      this.sendError(res, 500, `OAuth failed: ${(err as Error).message}`, 'OAUTH_FAILED');
+    }
+  }
+
+  /**
+   * GET /v1/plugins/:name/oauth/status — read-only status.
+   *
+   * Tells the web UI whether the plugin is configured (has client_id) and
+   * whether the OAuth dance has been completed (has a token in the vault).
+   * Never exposes client_secret material — only `{ configured, connected }`
+   * booleans + `expires_at` if a token exists.
+   */
+  private handleOAuthStatus(res: ServerResponse, pluginName: string): void {
+    if (!this.opts.oauthCredentials) {
+      this.sendError(
+        res,
+        501,
+        'OAuth credentials store not configured on this hub (rebuild with --enable-oauth-store or upgrade)',
+        'OAUTH_STORE_DISABLED',
+      );
+      return;
+    }
+    const plugin = this.opts.registry.listPlugins().find((p) => p.name === pluginName);
+    if (!plugin) {
+      this.sendError(res, 404, `plugin not found: ${pluginName}`, 'PLUGIN_NOT_FOUND');
+      return;
+    }
+    if (!plugin.oauth) {
+      // Plugin doesn't need OAuth at all — surface that explicitly.
+      this.sendJson(res, 200, {
+        plugin: pluginName,
+        requires_oauth: false,
+        configured: false,
+        connected: false,
+      });
+      return;
+    }
+    const configured =
+      this.opts.clientCredentials.has(pluginName) ||
+      this.opts.oauthCredentials.has(pluginName);
+    const tokenEntry = this.opts.tokens.get(pluginName);
+    const connected = tokenEntry !== null;
+    this.sendJson(res, 200, {
+      plugin: pluginName,
+      requires_oauth: true,
+      configured,
+      connected,
+      ...(tokenEntry?.expires_at ? { expires_at: tokenEntry.expires_at } : {}),
+    });
+  }
+
+  /**
+   * PUT /v1/plugins/:name/oauth/credentials — write credentials.
+   *
+   * Body accepts either:
+   *   { client_id, client_secret? }              — raw fields
+   *   { google_oauth_client_json: "<string>" }   — Google's standard JSON
+   *
+   * Google JSON format:
+   *   { "web": { "client_id": "...", "client_secret": "...",
+   *              "auth_uri": "...", "token_uri": "..." } }
+   *
+   * Encrypted at rest via PluginOAuthStore (AES-256-GCM, per-plugin
+   * HKDF-derived key). Returns `{ ok: true }` on success.
+   */
+  private async handlePutOAuthCredentials(
+    req: IncomingMessage,
+    res: ServerResponse,
+    pluginName: string,
+  ): Promise<void> {
+    if (!this.opts.oauthCredentials) {
+      this.sendError(
+        res,
+        501,
+        'OAuth credentials store not configured on this hub',
+        'OAUTH_STORE_DISABLED',
+      );
+      return;
+    }
+    const body = await this.readBody<Record<string, unknown>>(req);
+    let clientId: string;
+    let clientSecret: string | null;
+
+    const googleJson = this.stringField(body, 'google_oauth_client_json');
+    if (googleJson !== undefined) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(googleJson);
+      } catch {
+        this.sendError(res, 400, 'google_oauth_client_json is not valid JSON', 'INVALID_JSON');
+        return;
+      }
+      const web = (parsed as { web?: Record<string, unknown> } | null)?.web;
+      if (!web) {
+        this.sendError(
+          res,
+          400,
+          'google_oauth_client_json missing { web: { ... } } — is this a Google OAuth client JSON?',
+          'NOT_GOOGLE_JSON',
+        );
+        return;
+      }
+      const id = this.stringField(web, 'client_id');
+      const secret = this.stringField(web, 'client_secret');
+      if (!id || !secret) {
+        this.sendError(
+          res,
+          400,
+          'google_oauth_client_json.web must contain client_id and client_secret',
+          'MISSING_GOOGLE_FIELDS',
+        );
+        return;
+      }
+      clientId = id;
+      clientSecret = secret;
+    } else {
+      const id = this.stringField(body, 'client_id');
+      if (!id) {
+        this.sendError(res, 400, 'client_id is required', 'MISSING_CLIENT_ID');
+        return;
+      }
+      clientId = id;
+      const secret = this.stringField(body, 'client_secret');
+      clientSecret = secret ?? null;
+    }
+
+    this.opts.oauthCredentials.set(pluginName, {
+      client_id: clientId,
+      ...(clientSecret ? { client_secret: clientSecret } : {}),
+    });
+    this.sendJson(res, 200, { ok: true, plugin: pluginName });
+  }
+
+  /**
+   * POST /v1/plugins/:name/oauth/start — initiate OAuth dance.
+   *
+   * Returns the authorization_url for the web UI to open. The hub starts
+   * a loopback callback server (per OAuthFlow); when the provider
+   * redirects back, the token is stored automatically and the user is
+   * redirected to the success page.
+   */
+  private async handleStartOAuth(
+    res: ServerResponse,
+    pluginName: string,
+  ): Promise<void> {
+    const plugin = this.opts.registry.listPlugins().find((p) => p.name === pluginName);
+    if (!plugin) {
+      this.sendError(res, 404, `plugin not found: ${pluginName}`, 'PLUGIN_NOT_FOUND');
+      return;
+    }
+    if (!plugin.oauth) {
+      this.sendError(res, 400, 'plugin does not require OAuth', 'NO_OAUTH_CONFIG');
+      return;
+    }
+    const client = this.resolveClientCredentials(pluginName);
+    if (!client) {
+      this.sendError(
+        res,
+        400,
+        `no client credentials configured for plugin ${pluginName} — PUT /v1/plugins/${pluginName}/oauth/credentials first`,
+        'NO_CREDENTIALS',
       );
       return;
     }
@@ -1473,7 +1699,7 @@ export class HubServer {
     let tokens: DecryptedToken | null = null;
     if (federatedOAuthConfig) {
       if (this.opts.tokens.isExpiringSoon(pluginInfo.name)) {
-        const clientCreds = this.opts.clientCredentials.get(pluginInfo.name);
+        const clientCreds = this.resolveClientCredentials(pluginInfo.name);
         if (clientCreds) {
           try {
             await this.opts.tokens.refreshAccessToken(
@@ -2262,6 +2488,28 @@ export class HubServer {
     if (!obj) return undefined;
     const v = obj[key];
     return typeof v === 'string' ? v : undefined;
+  }
+
+  /**
+   * Resolve OAuth client credentials for a plugin.
+   *
+   * Priority order:
+   *   1. `clientCredentials` Map (legacy, env-var-loaded at startup)
+   *   2. `oauthCredentials` store (DB-backed, managed by web UI)
+   *
+   * Env-var config wins when both are set — keeps existing deployments
+   * working without changes. New setups configure via the store.
+   */
+  private resolveClientCredentials(plugin: string): PluginClientConfig | undefined {
+    const fromMap = this.opts.clientCredentials.get(plugin);
+    if (fromMap) return fromMap;
+    if (!this.opts.oauthCredentials) return undefined;
+    const fromStore = this.opts.oauthCredentials.get(plugin);
+    if (!fromStore) return undefined;
+    return {
+      client_id: fromStore.client_id,
+      ...(fromStore.client_secret ? { client_secret: fromStore.client_secret } : {}),
+    };
   }
 
   private recordField(

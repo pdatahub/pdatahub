@@ -54,7 +54,7 @@ function readUserVersion(): number {
 
 describe('migration v7 — T-PERSISTENT-001 mitigation #2', () => {
   it('fresh DB lands at user_version 7 with actor_context columns on audit_log', () => {
-    expect(readUserVersion()).toBe(7);
+    expect(readUserVersion()).toBe(8);
     const cols = db.prepare('PRAGMA table_info(audit_log)').all() as Array<{ name: string }>;
     const names = cols.map((c) => c.name);
     expect(names).toContain('actor_type');
@@ -117,7 +117,7 @@ describe('migration v7 — T-PERSISTENT-001 mitigation #2', () => {
       runMigrations(freshDb);
       const raw = freshDb.pragma('user_version') as unknown;
       const v = Array.isArray(raw) ? (raw[0] as { user_version?: number })?.user_version ?? -1 : -1;
-      expect(v).toBe(7);
+      expect(v).toBe(8);
       const cols = freshDb
         .prepare('PRAGMA table_info(audit_log)')
         .all() as Array<{ name: string }>;

@@ -38,7 +38,7 @@ function readUserVersion(): number {
 
 describe('Migration v5 — federation_nonces table', () => {
   it('sets user_version to 7 on a fresh DB (after T-PERSISTENT-001 mitigation #2 migration)', () => {
-    expect(readUserVersion()).toBe(7);
+    expect(readUserVersion()).toBe(8);
   });
 
   it('creates the federation_nonces table', () => {
@@ -68,7 +68,7 @@ describe('Migration v5 — federation_nonces table', () => {
 
   it('is idempotent — second runMigrations does not throw or change version', () => {
     expect(() => runMigrations(db)).not.toThrow();
-    expect(readUserVersion()).toBe(7);
+    expect(readUserVersion()).toBe(8);
     const count = db
       .prepare(
         "SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name='federation_nonces'",

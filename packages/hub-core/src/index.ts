@@ -29,6 +29,7 @@ import { loadConfigAsync, resolveMasterKey } from './config.js';
 import { GrantStore } from './grant-store.js';
 import { AuditLog } from './audit-log.js';
 import { TokenVault } from './token-vault.js';
+import { PluginOAuthStore } from './plugin-oauth-store.js';
 import { OAuthFlow } from './oauth-flow.js';
 import { ApprovalStream } from './approval-stream.js';
 import { PluginRegistry } from './plugin-process.js';
@@ -1296,6 +1297,14 @@ async function main(): Promise<void> {
     plugins: Array.from(clientCredentials.keys()),
   });
 
+  // OAuth UI (v0.4) — persistent, encrypted credentials store. Backed by the
+  // same DB + master key as TokenVault; uses a distinct HKDF info string
+  // so a vault compromise doesn't leak credentials and vice versa.
+  const oauthCredentials = new PluginOAuthStore(db, config.masterKey);
+  logger.info('oauth credentials store ready', {
+    configured_plugins: oauthCredentials.list(),
+  });
+
   // Create + start server
   const server = new HubServer({
     config,
@@ -1307,6 +1316,7 @@ async function main(): Promise<void> {
     oauth,
     approval,
     clientCredentials,
+    oauthCredentials,
     delegations,
     nonces,
   });

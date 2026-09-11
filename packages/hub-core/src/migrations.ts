@@ -343,6 +343,34 @@ const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 8,
+    up: (db) => {
+      // OAuth UI (v0.4 / pre-launch) — persistent storage for plugin
+      // OAuth client credentials (client_id, client_secret) so the web
+      // UI can configure them via PUT /v1/plugins/:name/oauth/credentials
+      // instead of forcing operators to set env vars and restart the hub.
+      //
+      // Encryption: AES-256-GCM with per-plugin HKDF-derived key
+      // (info string `pdatahub-oauth-credentials-v1`, distinct from
+      // TokenVault's `pdatahub-token-vault-v1`). One row per plugin.
+      // `client_secret_*` columns are nullable — Google supports PKCE-only
+      // flows without a secret (public clients).
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS plugin_oauth_credentials (
+          plugin TEXT PRIMARY KEY,
+          client_id_enc BLOB NOT NULL,
+          client_id_iv BLOB NOT NULL,
+          client_id_tag BLOB NOT NULL,
+          client_secret_enc BLOB,
+          client_secret_iv BLOB,
+          client_secret_tag BLOB,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+      `);
+    },
+  },
 ];
 
 /**
