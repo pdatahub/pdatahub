@@ -12,7 +12,7 @@
  */
 
 import { WebSocketServer, WebSocket } from 'ws';
-import type { Server as HttpServer } from 'node:http';
+import type { Server as HttpServer, IncomingMessage } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import type {
   ApprovalStreamMessage,
@@ -49,11 +49,25 @@ export class ApprovalStream {
   }
 
   /**
-   * Attach to existing HTTP server. Path: /approval-stream
+   * Attach to existing HTTP server. Path: /approval-stream.
+   *
+   * Clients authenticate by passing `?token=<HUB_API_TOKEN>` as a query
+   * string parameter. This is the standard pattern for WS auth in
+   * browsers (which can't send custom headers on `new WebSocket(...)`).
+   *
+   * Token verification matches HTTP auth (`checkAuth` in server.ts):
+   * - No HUB_API_TOKEN set → dev mode (loopback only, enforced by
+   *   startup.ts). Allow all connections; log a warning so the
+   *   operator sees it in logs.
+   * - HUB_API_TOKEN set → require `token` query param to match.
+   *   Mismatch closes the socket with code 4001 + 'unauthorized'.
+   *
+   * Previously relied entirely on Tailscale trust (WS bound to tailnet
+   * only). Token check closes that gap for non-Tailscale deployments.
    */
   attach(server: HttpServer): void {
     this.wss = new WebSocketServer({ server, path: '/approval-stream' });
-    this.wss.on('connection', (ws) => this.handleConnection(ws));
+    this.wss.on('connection', (ws, req) => this.handleConnection(ws, req));
     logger.info('approval stream attached', { path: '/approval-stream' });
   }
 
@@ -241,7 +255,27 @@ export class ApprovalStream {
 
   /* ─── Private ─────────────────────────────────────────────────────────── */
 
-  private handleConnection(ws: WebSocket): void {
+  private handleConnection(ws: WebSocket, req: IncomingMessage): void {
+    const expected = process.env.HUB_API_TOKEN;
+    if (expected) {
+      // Token is configured — require the client to pass it as a query param.
+      // URL format: ws://host:port/approval-stream?token=<HUB_API_TOKEN>
+      const url = new URL(req.url ?? '/', 'ws://placeholder');
+      const provided = url.searchParams.get('token');
+      if (provided !== expected) {
+        logger.warn('rejected unauthorized approval-stream connection', {
+          remote: req.socket.remoteAddress,
+          has_token: provided !== null,
+        });
+        ws.close(4001, 'unauthorized');
+        return;
+      }
+    } else {
+      // No token configured = dev mode (loopback enforced by startup.ts).
+      // HTTP auth does the same thing — see server.ts `checkAuth`.
+      logger.warn('HUB_API_TOKEN not set, allowing unauthenticated WS connection (dev only)');
+    }
+
     this.clients.add(ws);
     logger.info('client connected to approval stream', {
       total_clients: this.clients.size,

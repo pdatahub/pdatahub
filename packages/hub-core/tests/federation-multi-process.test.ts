@@ -259,7 +259,7 @@ async function setupHarness(opts: {
   });
   const hubB = await startHubSide({ hubName: 'userB' });
 
-  const approver = new WebSocket(`ws://127.0.0.1:${hubA.port}/approval-stream`);
+  const approver = new WebSocket(`ws://127.0.0.1:${hubA.port}/approval-stream?token=${HUB_API_TOKEN}`);
   approver.on('message', (raw) => {
     const msg = JSON.parse(raw.toString('utf8')) as { type?: string; request_id?: string };
     if (msg.type === 'approval_request' && typeof msg.request_id === 'string') {
@@ -439,7 +439,7 @@ describe('Phase 8a — full two-hub integration (happy path extensions)', () => 
     });
 
     const captured: unknown[] = [];
-    const inspectWs = new WebSocket(`ws://127.0.0.1:${h.hubA.port}/approval-stream`);
+    const inspectWs = new WebSocket(`ws://127.0.0.1:${h.hubA.port}/approval-stream?token=${HUB_API_TOKEN}`);
     inspectWs.on('message', (raw) => {
       const msg = JSON.parse(raw.toString('utf8'));
       if (msg.type === 'approval_request') {
@@ -506,7 +506,7 @@ describe('Phase 8a — full two-hub integration (happy path extensions)', () => 
     });
 
     process.env.HUB_API_TOKEN = HUB_API_TOKEN;
-    const approver2 = new WebSocket(`ws://127.0.0.1:${hubA2.port}/approval-stream`);
+    const approver2 = new WebSocket(`ws://127.0.0.1:${hubA2.port}/approval-stream?token=${HUB_API_TOKEN}`);
     approver2.on('message', (raw) => {
       const msg = JSON.parse(raw.toString('utf8')) as { type?: string; request_id?: string };
       if (msg.type === 'approval_request' && typeof msg.request_id === 'string') {

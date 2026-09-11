@@ -212,7 +212,7 @@ describe('Phase 5 end-to-end — real Hub A + real Hub B over HTTP', () => {
     hubB = await startHubSide({ hubName: 'userB' });
 
     // Auto-approve on A's side so the federated call doesn't hang.
-    approver = new WebSocket(`ws://127.0.0.1:${hubA.port}/approval-stream`);
+    approver = new WebSocket(`ws://127.0.0.1:${hubA.port}/approval-stream?token=integration-token`);
     approver.on('message', (raw) => {
       const msg = JSON.parse(raw.toString('utf8')) as { type?: string; request_id?: string };
       if (msg.type === 'approval_request' && typeof msg.request_id === 'string') {

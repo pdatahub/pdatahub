@@ -268,7 +268,7 @@ async function setupHarness(opts: {
 
   let approver: WebSocket | null = null;
   if (opts.connectApprover !== false) {
-    approver = new WebSocket(`ws://127.0.0.1:${hubA.port}/approval-stream`);
+    approver = new WebSocket(`ws://127.0.0.1:${hubA.port}/approval-stream?token=${HUB_API_TOKEN}`);
     approver.on('message', (raw) => {
       const msg = JSON.parse(raw.toString('utf8')) as {
         type?: string;

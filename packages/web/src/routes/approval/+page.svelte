@@ -51,11 +51,12 @@
 
   function connect() {
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const url = `${proto}//${window.location.host}/approval-stream`;
     const token = getApiToken();
+    const params = token ? `?token=${encodeURIComponent(token)}` : '';
+    const url = `${proto}//${window.location.host}/approval-stream${params}`;
     wsState = 'connecting';
     try {
-      ws = new WebSocket(url, token ? [`bearer.${token}`] : undefined);
+      ws = new WebSocket(url);
     } catch {
       wsState = 'error';
       scheduleReconnect();
