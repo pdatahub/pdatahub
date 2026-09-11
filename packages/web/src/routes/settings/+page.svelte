@@ -41,14 +41,27 @@
     } catch (err) {
       identityError = err instanceof Error ? err.message : 'unknown';
     }
-    // Status is bearer-authenticated — only fetch when we have a token.
-    if ($session.apiToken) {
-      try {
-        status = await api.status();
-      } catch (err) {
-        statusError = err instanceof Error ? err.message : 'unknown';
-      }
+  });
+
+  // Re-fetch status whenever the token changes (initial mount + after save).
+  // Without this, the System card stays "Loading…" until the user reloads.
+  $effect(() => {
+    const token = $session.apiToken;
+    if (!token) {
+      status = null;
+      statusError = null;
+      return;
     }
+    api.status().then(
+      (s) => {
+        status = s;
+        statusError = null;
+      },
+      (err) => {
+        status = null;
+        statusError = err instanceof Error ? err.message : 'unknown';
+      },
+    );
   });
 
   async function handleSave(e: SubmitEvent) {
