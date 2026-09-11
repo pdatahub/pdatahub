@@ -28,7 +28,7 @@ import type { PluginRegistry } from './plugin-process.js';
 import { PluginProcess as PluginProcessClass } from './plugin-process.js';
 import type { GrantStore } from './grant-store.js';
 import type { AuditLog, AuditQueryOptions } from './audit-log.js';
-import type { TokenVault } from './token-vault.js';
+import type { TokenVault, DecryptedToken } from './token-vault.js';
 import type { OAuthFlow, PluginClientConfig } from './oauth-flow.js';
 import type { ApprovalStream } from './approval-stream.js';
 import type { HubConfig } from './config.js';
@@ -782,34 +782,42 @@ export class HubServer {
       return;
     }
 
-    // Proactive refresh: if access_token expires within 5 minutes, swap it
-    // for a fresh one via refresh_token. Prevents 401 mid-call.
-    if (this.opts.tokens.isExpiringSoon(grant.plugin)) {
-      const clientCreds = this.opts.clientCredentials.get(grant.plugin);
-      const oauthConfig = plugin.getInfo().oauth;
-      if (clientCreds && oauthConfig) {
-        try {
-          await this.opts.tokens.refreshAccessToken(
-            grant.plugin,
-            clientCreds.client_id,
-            clientCreds.client_secret,
-            oauthConfig.token_url,
-          );
-        } catch (err) {
-          logger.warn('proactive token refresh failed, continuing with existing token', {
-            plugin: grant.plugin,
-            error: (err as Error).message,
-          });
+    // OAuth handling — only meaningful for plugins that declare @OAuth in
+    // their manifest. For plugins without OAuth (public APIs like
+    // catfact.ninja, local data sources, etc.), skip vault operations
+    // entirely so we don't audit a bogus "vault_access" row or throw
+    // "no token stored" for tools that never needed auth.
+    const pluginInfo = plugin.getInfo();
+    const oauthConfig = pluginInfo.oauth;
+    let tokens: DecryptedToken | null = null;
+    if (oauthConfig) {
+      // Proactive refresh: if access_token expires within 5 minutes, swap it
+      // for a fresh one via refresh_token. Prevents 401 mid-call.
+      if (this.opts.tokens.isExpiringSoon(grant.plugin)) {
+        const clientCreds = this.opts.clientCredentials.get(grant.plugin);
+        if (clientCreds) {
+          try {
+            await this.opts.tokens.refreshAccessToken(
+              grant.plugin,
+              clientCreds.client_id,
+              clientCreds.client_secret,
+              oauthConfig.token_url,
+            );
+          } catch (err) {
+            logger.warn('proactive token refresh failed, continuing with existing token', {
+              plugin: grant.plugin,
+              error: (err as Error).message,
+            });
+          }
         }
       }
+      tokens = this.opts.tokens.getAccessToken(grant.plugin, {
+        actor_type: 'agent',
+        actor_id: agentId,
+        tool_name: toolName,
+        request_id: requestId,
+      });
     }
-
-    const tokens = this.opts.tokens.getAccessToken(grant.plugin, {
-      actor_type: 'agent',
-      actor_id: agentId,
-      tool_name: toolName,
-      request_id: requestId,
-    });
 
     // Call plugin
     try {
@@ -1458,32 +1466,37 @@ export class HubServer {
     }
     const pluginInfo = plugin.getInfo();
 
-    // 10. Proactive OAuth refresh (existing pattern).
-    if (this.opts.tokens.isExpiringSoon(pluginInfo.name)) {
-      const clientCreds = this.opts.clientCredentials.get(pluginInfo.name);
-      const oauthConfig = pluginInfo.oauth;
-      if (clientCreds && oauthConfig) {
-        try {
-          await this.opts.tokens.refreshAccessToken(
-            pluginInfo.name,
-            clientCreds.client_id,
-            clientCreds.client_secret,
-            oauthConfig.token_url,
-          );
-        } catch (err) {
-          logger.warn('proactive token refresh failed, continuing with existing token', {
-            plugin: pluginInfo.name,
-            error: (err as Error).message,
-          });
+    // 10. Proactive OAuth refresh + token fetch — skip for plugins without
+    // OAuth (public APIs, local data sources). See handleCallTool for the
+    // full rationale on why vault ops are gated on the plugin's manifest.
+    const federatedOAuthConfig = pluginInfo.oauth;
+    let tokens: DecryptedToken | null = null;
+    if (federatedOAuthConfig) {
+      if (this.opts.tokens.isExpiringSoon(pluginInfo.name)) {
+        const clientCreds = this.opts.clientCredentials.get(pluginInfo.name);
+        if (clientCreds) {
+          try {
+            await this.opts.tokens.refreshAccessToken(
+              pluginInfo.name,
+              clientCreds.client_id,
+              clientCreds.client_secret,
+              federatedOAuthConfig.token_url,
+            );
+          } catch (err) {
+            logger.warn('proactive token refresh failed, continuing with existing token', {
+              plugin: pluginInfo.name,
+              error: (err as Error).message,
+            });
+          }
         }
       }
+      tokens = this.opts.tokens.getAccessToken(pluginInfo.name, {
+        actor_type: 'agent',
+        actor_id: agentId,
+        tool_name: toolName,
+        request_id: requestId,
+      });
     }
-    const tokens = this.opts.tokens.getAccessToken(pluginInfo.name, {
-      actor_type: 'agent',
-      actor_id: agentId,
-      tool_name: toolName,
-      request_id: requestId,
-    });
 
     // 11. Approval flow with 120s budget + federated metadata.
     let decision: import('./approval-stream.js').ApprovalDecision;
