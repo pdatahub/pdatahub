@@ -20,7 +20,7 @@
 
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from 'node:http';
 import { randomBytes, randomUUID } from 'node:crypto';
-import { existsSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, statSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { request as undiciRequest } from 'undici';
 import type Database from 'better-sqlite3';
@@ -335,7 +335,9 @@ export class HubServer {
 
   /**
    * Scan plugins directory and start each plugin subprocess.
-   * Each subdir in pluginsDir = one plugin (must contain dist/index.js).
+   * Each subdir in pluginsDir = one plugin. Entry point is resolved
+   * from the plugin's `package.json` (`main` field), with fallback to
+   * `dist/index.js` then `dist/plugin.js` for legacy packages.
    */
   async loadPluginsFromDir(): Promise<void> {
     const dir = this.opts.config.pluginsDir;
@@ -347,13 +349,51 @@ export class HubServer {
     for (const entry of entries) {
       const pluginDir = join(dir, entry);
       if (!statSync(pluginDir).isDirectory()) continue;
-      const entryPath = join(pluginDir, 'dist', 'index.js');
-      if (!existsSync(entryPath)) {
-        logger.warn('plugin missing dist/index.js, skipping', { plugin: entry, entryPath });
+      const entryPath = this.resolvePluginEntry(pluginDir);
+      if (!entryPath) {
+        logger.warn('plugin has no resolvable entry, skipping', {
+          plugin: entry,
+          pluginDir,
+        });
         continue;
       }
       await this.startPlugin(entry, entryPath);
     }
+  }
+
+  /**
+   * Resolve a plugin's entry-point script by reading its package.json.
+   *
+   * Priority:
+   *   1. `package.json` `main` field (resolves relative to pluginDir)
+   *   2. `dist/index.js`
+   *   3. `dist/plugin.js`
+   *
+   * Returns absolute path if found, `null` otherwise. Public so
+   * tests can exercise it without standing up the whole server.
+   */
+  resolvePluginEntry(pluginDir: string): string | null {
+    const pkgPath = join(pluginDir, 'package.json');
+    if (existsSync(pkgPath)) {
+      try {
+        const pkgRaw = readFileSync(pkgPath, 'utf8');
+        const pkg = JSON.parse(pkgRaw) as { main?: unknown; name?: unknown };
+        if (typeof pkg.main === 'string' && pkg.main.length > 0) {
+          const candidate = join(pluginDir, pkg.main);
+          if (existsSync(candidate)) return candidate;
+        }
+      } catch (err) {
+        logger.warn('failed to parse plugin package.json', {
+          pluginDir,
+          error: (err as Error).message,
+        });
+      }
+    }
+    for (const fallback of ['dist/index.js', 'dist/plugin.js']) {
+      const candidate = join(pluginDir, fallback);
+      if (existsSync(candidate)) return candidate;
+    }
+    return null;
   }
 
   async startPlugin(name: string, entryPath: string): Promise<PluginProcessInfo> {
@@ -922,11 +962,40 @@ export class HubServer {
     this.sendJson(res, 200, { plugins });
   }
 
+  /**
+   * Install a plugin. Two body shapes accepted (forward-compatible):
+   *
+   *   { url: "https://..." }            → download + extract from URL (web UI)
+   *   { name, entry_path: "/abs/..." }  → start a plugin already on disk
+   *
+   * URL installs go through `installPluginFromUrl` which handles
+   * download, atomic extract, and entry-point resolution. Path installs
+   * skip download and trust the caller (typically a setup script that
+   * already mounted the plugin).
+   */
   private async handleInstallPlugin(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    const body = await this.readBody<{ name: string; entry_path: string }>(req);
+    const body = await this.readBody<
+      { url?: string; name?: string; entry_path?: string }
+    >(req);
     try {
-      const info = await this.startPlugin(body.name, body.entry_path);
-      this.sendJson(res, 200, { installed: info });
+      if (typeof body.url === 'string' && body.url.length > 0) {
+        const { installPluginFromUrl } = await import('./plugin-installer.js');
+        const result = await installPluginFromUrl(body.url, this.opts.config.pluginsDir);
+        const info = await this.startPlugin(result.name, result.entryPath);
+        this.sendJson(res, 200, { installed: info });
+        return;
+      }
+      if (typeof body.name === 'string' && typeof body.entry_path === 'string') {
+        const info = await this.startPlugin(body.name, body.entry_path);
+        this.sendJson(res, 200, { installed: info });
+        return;
+      }
+      this.sendError(
+        res,
+        400,
+        'install requires either { url } or { name, entry_path }',
+        'INVALID_INSTALL_REQUEST',
+      );
     } catch (err) {
       this.sendError(res, 500, `install failed: ${(err as Error).message}`, 'INSTALL_FAILED');
     }
