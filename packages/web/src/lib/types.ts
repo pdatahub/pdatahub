@@ -78,3 +78,27 @@ export interface HubErrorResponse {
   code: string;
   request_id?: string;
 }
+
+export interface OAuthStatusResponse {
+  plugin: string;
+  requires_oauth: boolean;
+  configured: boolean;
+  connected: boolean;
+  expires_at?: string;
+}
+
+export interface OAuthStartResponse {
+  authorization_url: string;
+  state: string;
+  callback_port: number;
+}
+
+/**
+ * PUT body for OAuth credentials. Use EITHER the raw fields OR the
+ * Google JSON dump, not both — the hub picks whichever is set.
+ */
+export interface OAuthCredentialsInput {
+  client_id?: string;
+  client_secret?: string;
+  google_oauth_client_json?: string;
+}

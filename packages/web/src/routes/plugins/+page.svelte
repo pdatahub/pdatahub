@@ -2,18 +2,20 @@
   import { onMount } from 'svelte';
   import { api, HubError } from '$lib/api';
   import EmptyState from '$lib/components/EmptyState.svelte';
-  import type { ListToolsResponse, ToolDescriptor } from '$lib/types';
+  import OAuthSetupModal from '$lib/components/OAuthSetupModal.svelte';
+  import type { ListToolsResponse, OAuthStatusResponse, ToolDescriptor } from '$lib/types';
 
   let tools = $state<ListToolsResponse | null>(null);
   let loading = $state(true);
   let error = $state<string | null>(null);
 
-  // Plugin install form
   let installUrl = $state('');
   let installing = $state(false);
   let installMsg = $state<{ kind: 'success' | 'error'; text: string } | null>(null);
 
-  // Group tools by plugin
+  let oauthStatus = $state<Record<string, OAuthStatusResponse | null>>({});
+  let oauthModalPlugin = $state<string | null>(null);
+
   const byPlugin = $derived(() => {
     const groups = new Map<string, ToolDescriptor[]>();
     for (const t of tools?.tools ?? []) {
@@ -35,6 +37,14 @@
     } finally {
       loading = false;
     }
+    for (const [name] of byPlugin()) {
+      try {
+        const s = await api.oauthStatus(name);
+        oauthStatus = { ...oauthStatus, [name]: s };
+      } catch {
+        oauthStatus = { ...oauthStatus, [name]: null };
+      }
+    }
   }
 
   async function install() {
@@ -51,6 +61,15 @@
     } finally {
       installing = false;
     }
+  }
+
+  function statusBadge(name: string): { label: string; kind: 'ok' | 'warn' | 'muted' } | null {
+    const s = oauthStatus[name];
+    if (!s) return null;
+    if (!s.requires_oauth) return null;
+    if (s.connected) return { label: 'Connected', kind: 'ok' };
+    if (s.configured) return { label: 'Configured', kind: 'warn' };
+    return { label: 'Needs setup', kind: 'muted' };
   }
 
   onMount(load);
@@ -99,10 +118,23 @@
       />
     {:else}
       {#each byPlugin() as [name, tools]}
+        {@const badge = statusBadge(name)}
         <article class="plugin-card">
           <header>
             <h3>{name}</h3>
             <span class="count">{tools.length} tool{tools.length === 1 ? '' : 's'}</span>
+            {#if badge}
+              <span class="badge" data-kind={badge.kind}>{badge.label}</span>
+            {/if}
+            {#if oauthStatus[name]?.requires_oauth}
+              <button
+                type="button"
+                class="btn btn-small"
+                onclick={() => (oauthModalPlugin = name)}
+              >
+                {oauthStatus[name]?.connected ? 'Manage' : oauthStatus[name]?.configured ? 'Connect' : 'Setup'}
+              </button>
+            {/if}
           </header>
           <ul>
             {#each tools as tool}
@@ -118,6 +150,17 @@
     {/if}
   </section>
 </div>
+
+{#if oauthModalPlugin}
+  <OAuthSetupModal
+    pluginName={oauthModalPlugin}
+    status={oauthStatus[oauthModalPlugin] ?? null}
+    onClose={() => {
+      oauthModalPlugin = null;
+      load();
+    }}
+  />
+{/if}
 
 <style>
   .plugins { display: flex; flex-direction: column; gap: var(--space-6); }
@@ -160,11 +203,31 @@
   }
   .plugin-card header {
     display: flex;
-    align-items: baseline;
+    align-items: center;
     gap: var(--space-3);
     margin-bottom: var(--space-3);
+    flex-wrap: wrap;
   }
   .count { color: var(--fg-dim); font-size: 13px; }
+  .badge {
+    padding: 2px 8px;
+    border-radius: var(--radius-pill);
+    font-size: 12px;
+    font-weight: 500;
+  }
+  .badge[data-kind='ok'] { background: rgba(74, 222, 128, 0.18); color: var(--success); }
+  .badge[data-kind='warn'] { background: rgba(250, 204, 21, 0.18); color: #facc15; }
+  .badge[data-kind='muted'] { background: var(--bg-elev-2); color: var(--fg-dim); }
+  .btn-small {
+    background: var(--bg-elev-2);
+    border: 1px solid var(--border);
+    color: var(--fg);
+    padding: 4px 10px;
+    border-radius: var(--radius);
+    cursor: pointer;
+    font-size: 12px;
+    margin-left: auto;
+  }
   ul { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: var(--space-2); }
   li {
     display: flex;

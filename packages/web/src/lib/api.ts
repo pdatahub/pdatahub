@@ -17,6 +17,9 @@ import type {
   IdentityResponse,
   ListAuditResponse,
   ListToolsResponse,
+  OAuthCredentialsInput,
+  OAuthStartResponse,
+  OAuthStatusResponse,
   StatusResponse,
 } from './types';
 import { getApiToken } from './stores/session';
@@ -34,7 +37,7 @@ export class HubError extends Error {
 }
 
 interface FetchOptions {
-  method?: 'GET' | 'POST' | 'DELETE';
+  method?: 'GET' | 'POST' | 'PUT' | 'DELETE';
   body?: unknown;
   signal?: AbortSignal;
 }
@@ -103,4 +106,21 @@ export const api = {
       method: 'POST',
       body: { url },
     }),
+
+  // OAuth UI v0.4 — manage plugin client credentials + initiate OAuth dance.
+
+  oauthStatus: (pluginName: string) =>
+    request<OAuthStatusResponse>(`/v1/plugins/${encodeURIComponent(pluginName)}/oauth/status`),
+
+  setOAuthCredentials: (pluginName: string, body: OAuthCredentialsInput) =>
+    request<{ ok: true; plugin: string }>(
+      `/v1/plugins/${encodeURIComponent(pluginName)}/oauth/credentials`,
+      { method: 'PUT', body },
+    ),
+
+  startOAuth: (pluginName: string) =>
+    request<OAuthStartResponse>(
+      `/v1/plugins/${encodeURIComponent(pluginName)}/oauth/start`,
+      { method: 'POST' },
+    ),
 };
