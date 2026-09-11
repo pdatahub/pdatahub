@@ -63,6 +63,7 @@ import {
   type SafeError,
   type SanitizedErrorResponse,
 } from './error-sanitize.js';
+import { serveStatic, isApiPath } from './static.js';
 
 /**
  * Per-route authentication strategy.
@@ -389,6 +390,16 @@ export class HubServer {
       res.statusCode = 204;
       res.end();
       return;
+    }
+
+    // Static web UI — must run BEFORE auth, otherwise the token-entry
+    // page itself requires a token (chicken-and-egg). `isApiPath`
+    // excludes /v1/*, /health, /approval-stream so those still gate
+    // on auth + rate limit.
+    const staticPath = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`).pathname;
+    if (this.opts.config.webRoot && !isApiPath(staticPath)) {
+      const handled = serveStatic(res, this.opts.config.webRoot, staticPath);
+      if (handled) return;
     }
 
     // Auth check

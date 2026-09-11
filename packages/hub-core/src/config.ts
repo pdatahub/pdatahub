@@ -72,6 +72,14 @@ export interface HubConfig {
   rateLimitPerMinute: number;
   /** Burst capacity for the rate limiter. Default = rateLimitPerMinute. */
   rateLimitBurst: number;
+  /**
+   * Filesystem path to the prebuilt web UI (SvelteKit `build/` output).
+   * Set from `HUB_WEB_ROOT` env. Empty string disables static serving —
+   * useful for CLI subcommand paths (`identity show`, `backup`, etc.)
+   * that never start the HTTP server, and for unit tests that don't
+   * ship a built SPA. The Docker image builds the SPA into `/app/web`.
+   */
+  webRoot: string;
 }
 
 interface CliArgs {
@@ -91,6 +99,7 @@ interface CliArgs {
    * with `DynamicUser=` and `ProtectHome=yes`).
    */
   'ack-insecure-master-key'?: boolean;
+  'web-root'?: string;
 }
 
 function parseArgs(argv: string[]): CliArgs {
@@ -125,6 +134,7 @@ function parseArgs(argv: string[]): CliArgs {
       case 'log-level': out['log-level'] = next as CliArgs['log-level']; i++; break;
       case 'plugins-dir': out['plugins-dir'] = next; i++; break;
       case 'oauth-callback-port': out['oauth-callback-port'] = parseInt(next, 10); i++; break;
+      case 'web-root': out['web-root'] = next; i++; break;
       default: break;
     }
   }
@@ -329,6 +339,7 @@ export function loadConfig(argv: string[] = process.argv.slice(2)): HubConfig {
     oauthCallbackPort,
     rateLimitPerMinute: parseInt(process.env.HUB_RATE_LIMIT_PER_MIN ?? '60', 10),
     rateLimitBurst: parseInt(process.env.HUB_RATE_LIMIT_BURST ?? '60', 10),
+    webRoot: process.env.HUB_WEB_ROOT ?? '',
   };
 }
 
@@ -383,6 +394,7 @@ export async function loadConfigAsync(
     oauthCallbackPort,
     rateLimitPerMinute: parseInt(process.env.HUB_RATE_LIMIT_PER_MIN ?? '60', 10),
     rateLimitBurst: parseInt(process.env.HUB_RATE_LIMIT_BURST ?? '60', 10),
+    webRoot: process.env.HUB_WEB_ROOT ?? '',
   };
 }
 
